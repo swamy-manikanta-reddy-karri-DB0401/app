@@ -94,6 +94,9 @@ class FakeStore:
 
 
 def fresh():
+    # Which models exist is asked of Databricks; never from a test (CI has no workspace).
+    ca.dm.resolve = lambda models, tok, notes=None: {"chat": (models or {}).get("chat", "chat"), "code": "code", "judge": "judge"}
+    ca.dm.catalog = lambda tok: []
     fs = FakeStore()
     ca.store.run = fs.run
     ca.VERSIONS, ca.TESTS, ca.DOCS = "`c`.`s`.`portal_custom_agents`", "`c`.`s`.`portal_custom_agent_tests`", "`c`.`s`.`portal_custom_agent_docs`"

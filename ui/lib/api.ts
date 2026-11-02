@@ -22,6 +22,12 @@ export type Agent = {
   app_name?: string;
   app_url?: string;
   path?: string;
+  /** A custom agent run by the portal: which agent and version, its release state, and whether
+   *  this is a version still being prepared (shown only to its builders and approvers). */
+  custom_id?: string;
+  version?: number;
+  release?: string;
+  preview?: boolean;
   metered?: boolean;
   light?: boolean;
 };
@@ -481,6 +487,93 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T>
   return data as T;
 }
 
+/** What a builder sets for a custom agent (one that runs in the portal). */
+export type CustomSpec = {
+  name: string;
+  description: string;
+  instructions: string;
+  model: string;
+  rules: string[];
+  documents: string[];
+  tools: { app: string; name: string }[];
+  data: { space_id: string; title: string }[];
+  assistants: { key: string; name: string }[];
+  tests: { question: string; expect: string }[];
+  audience: { kind: "group" | "user"; principal: string }[];
+  ask_before_changes: boolean;
+};
+
+export type CustomTestResult = {
+  question: string;
+  expect: string;
+  rule: string;
+  answer: string;
+  tools: string[];
+  seconds: number;
+  verdict: "pass" | "fail" | "ungraded";
+  reason: string;
+  accepted?: { by: string; at: string; note: string };
+};
+
+export type CustomTestRun = { id: string; version: number; by: string; passed: boolean; at: string; results: CustomTestResult[] };
+
+export type CustomVersion = {
+  version: number;
+  status: string;
+  status_label: string;
+  by: string;
+  at: string;
+  live_since?: string;
+  decision?: { by: string; at: string; approved: boolean; note: string };
+};
+
+export type CustomSummary = {
+  id: string;
+  name: string;
+  description: string;
+  live_version: number | null;
+  latest: { version: number; status: string; status_label: string; created_by: string; meta: CustomMeta };
+  ready_to_send: boolean;
+  next: string;
+  versions: CustomVersion[];
+};
+
+export type CustomMeta = {
+  docs?: {
+    state: "reading" | "ready" | "failed" | "none";
+    files?: number;
+    parts?: number;
+    problems?: string[];
+    outline?: { file: string; about: string }[];
+  };
+  test?: { id: string; passed: boolean; total: number; good: number; by: string; at: string };
+  submitted?: { by: string; at: string; approvers: string[]; note: string };
+  decision?: { by: string; at: string; approved: boolean; note: string };
+  live_since?: string;
+};
+
+export type CustomDetail = CustomSummary & {
+  spec: CustomSpec;
+  meta: CustomMeta;
+  test: CustomTestRun | null;
+  live_spec: CustomSpec | null;
+  key: string;
+  warnings?: string[];
+  what?: string;
+};
+
+export type CustomOptions = {
+  models: { name: string; label: string; detail: string; recommended: boolean; tools: boolean | null; fit: string }[];
+  tools: { app: string; name: string; description: string; running: boolean; note: string }[];
+  data: { space_id: string; title: string; description: string }[];
+  assistants: { key: string; name: string; kind: string }[];
+  notes: Record<string, string>;
+};
+
+export type TestJob = { state: "running" | "done" | "failed"; done: number; total: number; step: string; seconds: number; error?: string };
+
+export type ApprovalWaiting = { id: string; name: string; version: number; sent_by: string; sent_at: string; note: string; key: string; replaces: number | null };
+
 /** A Databricks App an admin could offer as a custom-code agent. */
 export type AppCandidate = {
   name: string;
@@ -504,6 +597,24 @@ export type AppAgentSpec = {
 };
 
 export const api = {
+  customAgents: () => request<{ enabled: boolean; reason?: string; agents: CustomSummary[] }>("/api/admin/custom-agents"),
+  customOptions: () => request<CustomOptions>("/api/admin/custom-agents/options"),
+  customGet: (id: string) => request<CustomDetail>(`/api/admin/custom-agents/${id}`),
+  customCreate: (spec: CustomSpec) => request<CustomDetail>("/api/admin/custom-agents", spec),
+  customSave: (id: string, spec: CustomSpec) => send<CustomDetail>("PUT", `/api/admin/custom-agents/${id}`, spec),
+  customAudience: (id: string, audience: CustomSpec["audience"]) =>
+    send<CustomDetail>("PUT", `/api/admin/custom-agents/${id}/audience`, { audience }),
+  customTest: (id: string) => request<{ job: string }>(`/api/admin/custom-agents/${id}/tests`, {}),
+  customJob: (job: string) => request<TestJob>(`/api/admin/custom-agents/jobs/${job}`),
+  customAccept: (id: string, test: string, index: number, note: string) =>
+    request<CustomTestRun>(`/api/admin/custom-agents/${id}/tests/${test}/accept`, { index, note }),
+  customSubmit: (id: string, approvers: string[], note: string) =>
+    request<CustomDetail>(`/api/admin/custom-agents/${id}/submit`, { approvers, note }),
+  customRetire: (id: string) => request<CustomDetail>(`/api/admin/custom-agents/${id}/retire`, {}),
+  customDelete: (id: string) => send<{ deleted: string }>("DELETE", `/api/admin/custom-agents/${id}`),
+  approvals: () => request<{ items: ApprovalWaiting[] }>("/api/approvals"),
+  approvalGet: (id: string) => request<CustomDetail>(`/api/approvals/${id}`),
+  approvalDecide: (id: string, approve: boolean, note: string) => request<unknown>(`/api/approvals/${id}`, { approve, note }),
   appAgents: () => request<{ enabled: boolean; reason?: string; agents: Agent[] }>("/api/admin/app-agents"),
   appAgentApps: () => request<{ apps: AppCandidate[] }>("/api/admin/app-agents/apps"),
   appAgentCheck: (name: string) =>

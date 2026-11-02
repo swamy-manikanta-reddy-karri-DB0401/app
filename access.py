@@ -20,6 +20,7 @@ import re
 import time
 
 import app_agents
+import custom_agents
 from dbx import AGENT_TASK_PREFIX, PORTAL_TAG, QUERYABLE, DbxError, app_token, call
 
 ADMIN_GROUP = "admins"
@@ -353,7 +354,7 @@ def visible_agents(who: dict, app_tok: str, user_tok: str = "") -> list:
         except DbxError:
             pass
         out.append(dict(agent, access_reason=reason or "granted in Databricks"))
-    return out + app_agents.visible(who)
+    return out + app_agents.visible(who) + custom_agents.visible(who)
 
 
 def admin_agents(app_tok: str, user_tok: str = "", who: dict | None = None) -> list:

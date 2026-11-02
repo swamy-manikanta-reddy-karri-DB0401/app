@@ -34,8 +34,10 @@ import genie
 import knowledge
 import chats
 import connections
+import custom_agents
 import dashboard
 import designer
+import designer_models
 import events
 import files as filestore
 import signer
@@ -201,8 +203,11 @@ def send(
     # something about the request, and stays out of per-assistant reliability.
     events.note(label=agent.get("display_name"), detail={"files": len(uploads), "known": True})
     output_dir = filestore.output_dir_path(agent["output_volume"]) if agent.get("output_volume") else ""
-    out = chat.ask(_transport(agent), agent["task"], history, tok, files=uploads, output_dir=output_dir,
-                   ask_person=_policy(agent, tok))
+    if agent.get("custom_id"):
+        out = custom_agents.ask(custom_agents.resolve(endpoint, who), history, tok, who)
+    else:
+        out = chat.ask(_transport(agent), agent["task"], history, tok, files=uploads, output_dir=output_dir,
+                       ask_person=_policy(agent, tok))
     return _answered(out, endpoint, who, tok, payload, history, background, len(uploads))
 
 
@@ -249,8 +254,9 @@ def _answered(out: dict, endpoint: str, who: dict, tok: str, payload: dict, hist
         # and assistant so it cannot be swapped for another. What they decide comes back to
         # /api/chat/decide. Not saved yet: the exchange is not finished.
         state = {"e": endpoint, "u": who["user_name"], "pause": pause}
-        out["approval"] = {"state": state, "sig": signer.mac(state),
-                           "items": [toolpolicy.describe(a, tok) for a in pause["approvals"] if a.get("id") in pause["asked"]]}
+        items = (custom_agents.approval_items(pause) if custom_agents.is_key(endpoint)
+                 else [toolpolicy.describe(a, tok) for a in pause["approvals"] if a.get("id") in pause["asked"]])
+        out["approval"] = {"state": state, "sig": signer.mac(state), "items": items}
         events.note(detail={**(extra or {}), "waiting_for": [a.get("name") for a in pause["approvals"] if a.get("id") in pause["asked"]]})
         return out
 
@@ -292,7 +298,10 @@ def chat_decide(
     no = [named[i] for i in pause.get("asked") or [] if not decisions.get(i)]
     # The person's decision is the audit record, under their own identity; never the arguments.
     events.note(label=agent.get("display_name"), detail={"known": True, "approved": yes, "declined": no})
-    out = chat.resume(_transport(agent), pause, decisions, tok, ask_person=_policy(agent, tok))
+    if agent.get("custom_id"):
+        out = custom_agents.resume(custom_agents.resolve(endpoint, who), pause, decisions, tok, who)
+    else:
+        out = chat.resume(_transport(agent), pause, decisions, tok, ask_person=_policy(agent, tok))
     return _answered(out, endpoint, who, tok, payload, history, background, extra={"approved": yes, "declined": no})
 
 
@@ -625,6 +634,218 @@ def app_agent_remove(name: str, x_forwarded_access_token: str = Header(None)):
     return {"removed": name}
 
 
+# --------------------------------------------------------------- custom agents (run in the portal)
+
+
+def _custom_or_404(agent_id: str) -> dict:
+    if not custom_agents.enabled():
+        raise HTTPException(503, custom_agents.OFF)
+    if not re.match(r"^[0-9a-f]{32}$", agent_id or ""):
+        raise HTTPException(404, "There is no such custom agent.")
+    return custom_agents.summary(agent_id)
+
+
+def _custom_detail(agent_id: str) -> dict:
+    out = _custom_or_404(agent_id)
+    last = custom_agents.latest(agent_id)
+    out["spec"] = last["spec"]
+    out["meta"] = last["meta"]
+    test = last["meta"].get("test") or {}
+    out["test"] = custom_agents.test_run(agent_id, test["id"]) if test.get("id") else None
+    cur = custom_agents.live(agent_id)
+    out["live_spec"] = cur["spec"] if cur and cur["version"] != last["version"] else None
+    out["key"] = custom_agents.key(agent_id, last["version"])
+    return out
+
+
+def _prepare_tools(spec: dict, tok: str) -> list:
+    """Let the portal call the chosen tool apps when a person's own sign-in is refused by them (as the admin)."""
+    warnings = []
+    for t in spec["tools"]:
+        try:
+            tooltest._let_portal_use(t["app"], tok)
+        except DbxError as exc:
+            warnings.append("The portal could not be given access to %s: %s" % (t["name"], str(exc)[:120]))
+    return warnings
+
+
+@app.get("/api/admin/custom-agents")
+def custom_list(x_forwarded_access_token: str = Header(None)):
+    _require_admin(x_forwarded_access_token)
+    if not custom_agents.enabled():
+        return {"enabled": False, "reason": custom_agents.OFF, "agents": []}
+    return {"enabled": True, "agents": [custom_agents.summary(a) for a in custom_agents.all_agents(fresh=True)]}
+
+
+@app.get("/api/admin/custom-agents/options")
+def custom_options(x_forwarded_access_token: str = Header(None)):
+    """What a custom agent can be given: models this admin may use, running tools, data assistants
+    and other assistants. Each list says why it is empty instead of failing the page."""
+    who, tok = _require_admin(x_forwarded_access_token)
+    out: dict = {"notes": {}}
+    out["models"] = [m for m in designer_models.catalog(tok)]
+    try:
+        tools = []
+        for e in mcps.listing(tok)["mcps"]:
+            tools.append({"app": e["app_name"], "name": e["name"], "description": e.get("description") or "",
+                          "running": e["state"] == "running", "note": e.get("problem") or e.get("state_note") or ""})
+        for e in mcps.installed(tok):
+            tools.append({"app": e["name"], "name": e["name"], "description": e["description"],
+                          "running": e["state"] == "running", "note": e.get("note") or ""})
+        out["tools"] = tools
+    except DbxError as exc:
+        out["tools"], out["notes"]["tools"] = [], "The tools could not be listed: " + str(exc)[:160]
+    try:
+        out["data"] = genie.list_spaces(tok)
+    except DbxError as exc:
+        out["data"], out["notes"]["data"] = [], "The data assistants could not be listed: " + str(exc)[:160]
+    out["assistants"] = [{"key": a["name"], "name": a["display_name"], "kind": a.get("kind_label") or ""}
+                         for a in access.visible_agents(who, app_token(), tok) if not a.get("preview")]
+    return out
+
+
+@app.get("/api/admin/custom-agents/{agent_id}")
+def custom_get(agent_id: str, x_forwarded_access_token: str = Header(None)):
+    _require_admin(x_forwarded_access_token)
+    return _custom_detail(agent_id)
+
+
+@app.post("/api/admin/custom-agents")
+def custom_create(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    who, tok = _require_admin(x_forwarded_access_token)
+    spec = custom_agents.clean(payload)
+    events.note(action="created_assistant", label=spec["name"], detail={"type": "Custom agent"})
+    if not custom_agents.enabled():
+        raise HTTPException(503, custom_agents.OFF)
+    problems = custom_agents.verify(spec, tok, who)
+    if problems:
+        raise HTTPException(400, " ".join(problems))
+    warnings = _prepare_tools(spec, tok)
+    rec = custom_agents.create(spec, who)
+    events.note(target=custom_agents.key(rec["agent_id"]))
+    custom_agents.start_reading(rec, tok)
+    return dict(_custom_detail(rec["agent_id"]), warnings=warnings)
+
+
+@app.put("/api/admin/custom-agents/{agent_id}")
+def custom_save(agent_id: str, payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    who, tok = _require_admin(x_forwarded_access_token)
+    _custom_or_404(agent_id)
+    spec = custom_agents.clean(payload)
+    events.note(action="edited_assistant", target=custom_agents.key(agent_id), label=spec["name"], detail={"type": "Custom agent"})
+    problems = custom_agents.verify(spec, tok, who, own_key=custom_agents.key(agent_id))
+    if problems:
+        raise HTTPException(400, " ".join(problems))
+    warnings = _prepare_tools(spec, tok)
+    rec, what = custom_agents.save(agent_id, spec, who)
+    custom_agents.start_reading(rec, tok)
+    return dict(_custom_detail(agent_id), warnings=warnings, what=what)
+
+
+@app.put("/api/admin/custom-agents/{agent_id}/audience")
+def custom_audience(agent_id: str, payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    _require_admin(x_forwarded_access_token)
+    s = _custom_or_404(agent_id)
+    aud = payload.get("audience") or []
+    events.note(action="changed_settings", target=custom_agents.key(agent_id), label=s["name"], detail={"fields": ["audience"]})
+    custom_agents.set_audience(agent_id, aud)
+    return _custom_detail(agent_id)
+
+
+@app.post("/api/admin/custom-agents/{agent_id}/tests")
+def custom_test(agent_id: str, x_forwarded_access_token: str = Header(None)):
+    who, tok = _require_admin(x_forwarded_access_token)
+    _custom_or_404(agent_id)
+    rec = custom_agents.latest(agent_id)
+    if rec["status"] != "draft":
+        raise HTTPException(409, "Only a draft is tested. Change the agent to make a new draft.")
+    if (rec["meta"].get("docs") or {}).get("state") == "reading":
+        raise HTTPException(409, "The documents are still being read. Try again when that is done.")
+    if len(rec["spec"]["tests"]) < custom_agents.MIN_TESTS:
+        raise HTTPException(400, "Add at least %d test questions first." % custom_agents.MIN_TESTS)
+    return {"job": custom_agents.start_tests(rec, tok, who)}
+
+
+@app.get("/api/admin/custom-agents/jobs/{job_id}")
+def custom_job(job_id: str, x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_admin(x_forwarded_access_token)
+    j = custom_agents.job(job_id, who)
+    if j["state"] == "done" and not j.get("noted"):
+        r = j.get("result") or {}
+        custom_agents._jobs[job_id]["noted"] = True
+        name = custom_agents.latest(j["agent_id"])["spec"]["name"]
+        events.note(action="tested_assistant", target=custom_agents.key(j["agent_id"]), label=name,
+                    detail={"total": r.get("total"), "good": r.get("good"), "passed": r.get("passed")})
+    return j
+
+
+@app.post("/api/admin/custom-agents/{agent_id}/tests/{test_id}/accept")
+def custom_accept(agent_id: str, test_id: str, payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_admin(x_forwarded_access_token)
+    _custom_or_404(agent_id)
+    return custom_agents.accept(agent_id, test_id, int(payload.get("index", -1)), str(payload.get("note") or ""), who)
+
+
+@app.post("/api/admin/custom-agents/{agent_id}/submit")
+def custom_submit(agent_id: str, payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_admin(x_forwarded_access_token)
+    s = _custom_or_404(agent_id)
+    approvers = [str(a) for a in (payload.get("approvers") or []) if a]
+    events.note(action="sent_for_approval", target=custom_agents.key(agent_id), label=s["name"], detail={"approvers": approvers[:10]})
+    try:
+        people = {u["name"] for u in access.principals(app_token())["users"]}
+    except DbxError:
+        people = set()  # the list could not be read; names are still checked when someone tries to approve
+    custom_agents.submit(agent_id, approvers, str(payload.get("note") or ""), who, people)
+    return _custom_detail(agent_id)
+
+
+@app.post("/api/admin/custom-agents/{agent_id}/retire")
+def custom_retire(agent_id: str, x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_admin(x_forwarded_access_token)
+    s = _custom_or_404(agent_id)
+    events.note(action="retired_assistant", target=custom_agents.key(agent_id), label=s["name"])
+    custom_agents.retire(agent_id, who)
+    return _custom_detail(agent_id)
+
+
+@app.delete("/api/admin/custom-agents/{agent_id}")
+def custom_delete(agent_id: str, x_forwarded_access_token: str = Header(None)):
+    _require_admin(x_forwarded_access_token)
+    s = _custom_or_404(agent_id)
+    events.note(action="deleted_assistant", target=custom_agents.key(agent_id), label=s["name"], detail={"type": "Custom agent"})
+    custom_agents.delete(agent_id)
+    return {"deleted": agent_id}
+
+
+@app.get("/api/approvals")
+def approvals(x_forwarded_access_token: str = Header(None)):
+    """Agents waiting for this person's approval. Anyone may be chosen as an approver, not only admins."""
+    who, _ = _who(x_forwarded_access_token)
+    if not custom_agents.enabled():
+        return {"items": []}
+    return {"items": custom_agents.waiting_for(who)}
+
+
+@app.get("/api/approvals/{agent_id}")
+def approval_detail(agent_id: str, x_forwarded_access_token: str = Header(None)):
+    who, _ = _who(x_forwarded_access_token)
+    if not any(i["id"] == agent_id for i in custom_agents.waiting_for(who)):
+        raise HTTPException(403, "You were not asked to approve this agent, or it has already been decided.")
+    return _custom_detail(agent_id)
+
+
+@app.post("/api/approvals/{agent_id}")
+def approval_decide(agent_id: str, payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    who, _ = _who(x_forwarded_access_token)
+    approve = bool(payload.get("approve"))
+    s = _custom_or_404(agent_id)
+    events.note(action="approved_release" if approve else "sent_back", target=custom_agents.key(agent_id), label=s["name"],
+                detail={"version": s["latest"]["version"]})
+    custom_agents.decide(agent_id, approve, str(payload.get("note") or ""), who)
+    return _custom_detail(agent_id) if who.get("is_admin") else {"decided": True, "approved": approve}
+
+
 @app.get("/api/admin/builder/types")
 def builder_types(x_forwarded_access_token: str = Header(None)):
     _require_admin(x_forwarded_access_token)
@@ -831,6 +1052,13 @@ def _names(tok: str) -> dict:
         names = {}
     try:
         names.update({app_agents.key(r["app_name"]): r["display_name"] for r in app_agents.registered()})
+    except DbxError:
+        pass
+    try:
+        for agent_id, vs in custom_agents.all_agents().items():
+            names[custom_agents.key(agent_id)] = vs[-1]["spec"]["name"]
+            for r in vs:
+                names[custom_agents.key(agent_id, r["version"])] = "%s (version %d)" % (r["spec"]["name"], r["version"])
     except DbxError:
         pass
     return names

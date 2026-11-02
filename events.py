@@ -82,6 +82,11 @@ CATEGORY = {
     "deleted_assistant": "build",
     "attached_file": "build",
     "saved_connection": "access",
+    "tested_assistant": "build",
+    "sent_for_approval": "build",
+    "approved_release": "build",
+    "sent_back": "build",
+    "retired_assistant": "build",
 }
 
 COLUMNS = ("at", "actor", "action", "category", "target", "label", "status", "http_status", "ms", "error_kind", "error", "detail")

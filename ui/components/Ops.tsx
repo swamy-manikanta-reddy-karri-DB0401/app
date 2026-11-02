@@ -348,6 +348,16 @@ function sentence(e: PortalEvent): ReactNode {
       return <>{name} deleted an assistant</>;
     case "attached_file":
       return <>{name} attached {b(label)} while designing an assistant</>;
+    case "tested_assistant":
+      return <>{name} tested {b(label)}: {d.good ?? "?"} of {d.total ?? "?"} answers good</>;
+    case "sent_for_approval":
+      return <>{name} sent {b(label)} for approval{(d.approvers || []).length ? <> to {(d.approvers as string[]).join(", ")}</> : null}</>;
+    case "approved_release":
+      return <>{name} approved {b(label)}; it is now live</>;
+    case "sent_back":
+      return <>{name} sent {b(label)} back for changes</>;
+    case "retired_assistant":
+      return <>{name} retired {b(label)}</>;
     case "saved_connection":
       return <>{name} {d.replaced ? "replaced" : "saved"} the connection {b(label)}</>;
     default:

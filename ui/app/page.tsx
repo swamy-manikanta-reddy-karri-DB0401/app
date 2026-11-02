@@ -8,6 +8,7 @@ import { Chat } from "@/components/Chat";
 import { Admin } from "@/components/Admin";
 import { AuditLogPage, MonitoringPage } from "@/components/Ops";
 import { Builder } from "@/components/Builder";
+import { Approvals } from "@/components/custom/Approvals";
 import { Dashboard, Insights } from "@/components/Dashboard";
 import { Home, whenAgo } from "@/components/Home";
 import { Page as SwitcherPage, QuickSwitcher } from "@/components/QuickSwitcher";
@@ -15,6 +16,7 @@ import { ErrorBox, Spinner } from "@/components/bits";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import {
   ChartIcon,
+  CheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
@@ -37,6 +39,8 @@ import { PORTAL_LOGO, PORTAL_NAME } from "@/lib/portalLogo";
 const SECTIONS: { value: string; label: string; icon: (s?: number) => ReactNode; admin?: boolean }[] = [
   { value: "agents", label: "Assistants", icon: (s) => <GridIcon size={s} /> },
   { value: "dashboard", label: "My dashboard", icon: (s) => <UserIcon size={s} /> },
+  // Shown to admins, and to anyone with an agent waiting for their approval (see `shown`).
+  { value: "approvals", label: "Approvals", icon: (s) => <CheckIcon size={s} /> },
   { value: "insights", label: "Insights", icon: (s) => <ChartIcon size={s} />, admin: true },
   { value: "access", label: "Access", icon: (s) => <UsersIcon size={s} />, admin: true },
   { value: "build", label: "Build", icon: (s) => <WandIcon size={s} />, admin: true },
@@ -52,6 +56,7 @@ export default function Page() {
   const [fatal, setFatal] = useState("");
 
   const [agents, setAgents] = useState<Agent[] | null>(null);
+  const [waiting, setWaiting] = useState(0);
   const [agentsErr, setAgentsErr] = useState("");
   const [recents, setRecents] = useState<SavedChat[] | null>(null);
 
@@ -119,13 +124,42 @@ export default function Page() {
     link.href = brandLogo;
   }, [session, brandName, brandLogo]);
 
+  const loadAgents = useCallback(async () => {
+    try {
+      const d = await api.agents();
+      setAgents(d.agents);
+      return d.agents;
+    } catch (e: any) {
+      setAgentsErr(e.message);
+      return [] as Agent[];
+    }
+  }, []);
+
+  const loadWaiting = useCallback(() => {
+    api
+      .approvals()
+      .then((r) => setWaiting(r.items.length))
+      .catch(() => setWaiting(0));
+  }, []);
+
   useEffect(() => {
     if (!session) return;
-    api
-      .agents()
-      .then((d) => setAgents(d.agents))
-      .catch((e) => setAgentsErr(e.message));
-  }, [session]);
+    loadAgents();
+    loadWaiting();
+  }, [session, loadAgents, loadWaiting]);
+
+  // A custom agent's version still being prepared is open only to its builders and approvers, from
+  // its own page: it is not listed with the assistants people use.
+  const listed = useMemo(() => (agents ? agents.filter((a) => !a.preview) : null), [agents]);
+  const shown = (v: string) => v !== "approvals" || !!session?.is_admin || waiting > 0;
+
+  // Open an assistant by its name, reading the list again first (a draft just saved is not in it yet).
+  async function openKey(key: string) {
+    const list = await loadAgents();
+    const a = list.find((x) => x.name === key);
+    if (a) openAgent(a);
+    else setAgentsErr("That agent is not available to you yet. If it was just saved, wait for its documents to be read.");
+  }
 
   // Recent conversations, across every assistant. Refreshed whenever a chat is
   // closed so what was just said shows up straight away.
@@ -165,8 +199,9 @@ export default function Page() {
 
   const pages = useMemo<SwitcherPage[]>(
     () =>
-      SECTIONS.filter((s) => !s.admin || session?.is_admin).map((s) => ({ value: s.value, label: s.label, icon: s.icon(18) })),
-    [session]
+      SECTIONS.filter((s) => (!s.admin || session?.is_admin) && shown(s.value)).map((s) => ({ value: s.value, label: s.label, icon: s.icon(18) })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session, waiting]
   );
 
   function openAgent(a: Agent) {
@@ -278,8 +313,15 @@ export default function Page() {
           <nav className="side-scroll mt-2 min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-4">
             <Tabs.List aria-label="Sections" className="flex flex-col gap-0.5">
               <p className={`side-label ${rail ? "lg:sr-only" : ""}`}>Workspace</p>
-              {SECTIONS.filter((s) => !s.admin).map((s) => (
-                <NavItem key={s.value} value={s.value} icon={s.icon()} label={s.label} rail={rail} count={s.value === "agents" ? agents?.length : undefined} />
+              {SECTIONS.filter((s) => !s.admin && shown(s.value)).map((s) => (
+                <NavItem
+                  key={s.value}
+                  value={s.value}
+                  icon={s.icon()}
+                  label={s.label}
+                  rail={rail}
+                  count={s.value === "agents" ? listed?.length : s.value === "approvals" && waiting ? waiting : undefined}
+                />
               ))}
               {session.is_admin ? (
                 <>
@@ -412,7 +454,7 @@ export default function Page() {
             {open ? (
               <Chat
                 agent={open}
-                agents={agents || []}
+                agents={listed || []}
                 historyEnabled={session.chat_history}
                 resumeId={resumeId}
                 onBack={() => setOpen(null)}
@@ -423,7 +465,7 @@ export default function Page() {
                 <Tabs.Content value="agents" className="outline-none">
                   <Home
                     session={session}
-                    agents={agents}
+                    agents={listed}
                     agentsErr={agentsErr}
                     recents={session.chat_history ? recents : []}
                     onOpen={openAgent}
@@ -432,13 +474,24 @@ export default function Page() {
                 </Tabs.Content>
 
                 <Tabs.Content value="dashboard" className="outline-none">
-                  <Dashboard onGoto={goPage} agents={agents || []} onOpen={openAgent} onResume={resumeChat} />
+                  <Dashboard onGoto={goPage} agents={listed || []} onOpen={openAgent} onResume={resumeChat} />
                 </Tabs.Content>
+
+                {shown("approvals") ? (
+                  <Tabs.Content value="approvals" className="outline-none">
+                    <PageHead
+                      eyebrow="Workspace"
+                      title="Approvals"
+                      text="Agents someone asked you to approve. Read what each does and its test answers, try it, then approve it or send it back."
+                    />
+                    <Approvals onTry={openKey} onChanged={() => { loadWaiting(); loadAgents(); }} />
+                  </Tabs.Content>
+                ) : null}
 
                 {session.is_admin ? (
                   <>
                     <Tabs.Content value="insights" className="outline-none">
-                      <Insights agents={agents || []} onGoto={goPage} />
+                      <Insights agents={listed || []} onGoto={goPage} />
                     </Tabs.Content>
                     <Tabs.Content value="access" className="outline-none">
                       <PageHead
@@ -449,7 +502,7 @@ export default function Page() {
                       <Admin />
                     </Tabs.Content>
                     <Tabs.Content value="build" className="outline-none">
-                      <Builder onGoto={pickTab} />
+                      <Builder onGoto={pickTab} onTry={openKey} />
                     </Tabs.Content>
                     <Tabs.Content value="monitoring" className="outline-none">
                       <PageHead
@@ -478,7 +531,7 @@ export default function Page() {
       <QuickSwitcher
         open={switcher}
         onClose={() => setSwitcher(false)}
-        agents={agents || []}
+        agents={listed || []}
         pages={pages}
         onAgent={openAgent}
         onPage={goPage}

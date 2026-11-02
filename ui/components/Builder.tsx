@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Agent, api, BuilderTool, DesignerInfo, FileSettings, McpEntry, SourceItem, ToolType } from "@/lib/api";
+import { Agent, api, CustomSpec, CustomSummary, BuilderTool, DesignerInfo, FileSettings, McpEntry, SourceItem, ToolType } from "@/lib/api";
 import { CardList, Empty, ErrorBox, Select, Spinner, Tag, useLoad } from "./bits";
 import { middleShort } from "@/lib/people";
 import { ArrowRightIcon, CheckIcon, PlusIcon, SparkleIcon } from "./icons";
@@ -10,6 +10,9 @@ import { KnowledgeWizard } from "./KnowledgeBuilder";
 import { GenieWizard } from "./GenieBuilder";
 import { Designer } from "./Designer";
 import { AppAgentWizard } from "./AppAgentBuilder";
+import { CustomWizard } from "./custom/CustomWizard";
+import { CustomAgentPage } from "./custom/CustomAgentPage";
+import { ReleasePill } from "./custom/parts";
 import { ChosenRow, isCatalogTool, McpPicker, ToolProgress, ToolWait } from "./McpCatalog";
 
 type Row = Awaited<ReturnType<typeof api.builderAgents>>["agents"][number];
@@ -111,7 +114,7 @@ function parseTypes(s: string): string[] {
 
 // ---------------------------------------------------------------------------
 
-export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
+export function Builder({ onGoto, onTry }: { onGoto?: (tab: string) => void; onTry?: (key: string) => void }) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [spaces, setSpaces] = useState<{ space_id: string; title: string; description: string }[] | null>(null);
   const [err, setErr] = useState("");
@@ -127,7 +130,11 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
     | { v: "docs"; id: string | null }
     | { v: "designer" }
     | { v: "app"; agent: Agent | null }
+    | { v: "custom"; id: string | null; initial: CustomSpec | null }
+    | { v: "customPage"; id: string; warnings?: string[] }
   >({ v: "home" });
+  const [customs, setCustoms] = useState<{ enabled: boolean; reason?: string; agents: CustomSummary[] } | null>(null);
+  const [customsErr, setCustomsErr] = useState("");
   const [apps, setApps] = useState<{ enabled: boolean; reason?: string; agents: Agent[] } | null>(null);
   const [appsErr, setAppsErr] = useState("");
   // The "describe it in your own words" beta: offered unless an operator switched it off. When it is
@@ -156,6 +163,13 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
     } catch (e: any) {
       setKas([]);
       setKasErr(e.message);
+    }
+    setCustomsErr("");
+    try {
+      setCustoms(await api.customAgents());
+    } catch (e: any) {
+      setCustoms({ enabled: false, agents: [] });
+      setCustomsErr(e.message);
     }
     setAppsErr("");
     try {
@@ -187,6 +201,32 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
   }
   if (view.v === "genie") {
     return <GenieWizard id={view.id} onCancel={() => setView({ v: "home" })} onFinished={finished} />;
+  }
+  if (view.v === "custom") {
+    return (
+      <CustomWizard
+        id={view.id}
+        initial={view.initial}
+        onCancel={() => setView(view.id ? { v: "customPage", id: view.id } : { v: "home" })}
+        onSaved={(id, warnings) => {
+          load();
+          setView({ v: "customPage", id, warnings });
+        }}
+      />
+    );
+  }
+  if (view.v === "customPage") {
+    return (
+      <CustomAgentPage
+        id={view.id}
+        onBack={() => {
+          load();
+          setView({ v: "home" });
+        }}
+        onEdit={(d) => setView({ v: "custom", id: d.id, initial: d.spec })}
+        onTry={(k) => onTry?.(k)}
+      />
+    );
   }
   if (view.v === "app") {
     return <AppAgentWizard editing={view.agent} onCancel={() => setView({ v: "home" })} onFinished={finished} />;
@@ -264,6 +304,26 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
           </>
         ) : null}
         <div className="grid grid-cols-[repeat(auto-fill,minmax(min(320px,100%),1fr))] gap-4">
+          <button
+            type="button"
+            className="choice !p-6"
+            aria-pressed={false}
+            disabled={customs !== null && !customs.enabled}
+            onClick={() => setView({ v: "custom", id: null, initial: null })}
+          >
+            <span>
+              <span className="flex flex-wrap items-center gap-2 text-lg font-semibold">
+                Custom agent <Tag title="Tested and approved before anyone else can use it">Test and release</Tag>
+              </span>
+              <span className="mt-1 block text-[15px] muted">
+                You choose its AI model and what it can use: documents, tools, data and other assistants. It is tested, then approved
+                by people you choose, before anyone else can use it.
+              </span>
+              <span className="mt-3 block text-[13px] faint">
+                {customs !== null && !customs.enabled ? customs.reason : "Good for: agents that need a review before release"}
+              </span>
+            </span>
+          </button>
           <button type="button" className="choice !p-6" aria-pressed={false} onClick={() => setView({ v: "assistant", id: null })}>
             <span>
               <span className="block text-lg font-semibold">Combine tools and information</span>
@@ -382,6 +442,42 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
             keyOf={(k) => k.ka_id}
             text={(k) => `${k.display_name || ""} ${k.description || ""}`}
             render={(k) => <EditCard title={k.display_name} description={k.description} onOpen={() => setView({ v: "docs", id: k.ka_id })} />}
+          />
+        )}
+      </BuiltSection>
+
+      <BuiltSection title="Custom agents" sub="Run in the portal. Tested and approved before people use them.">
+        {customsErr ? <p className="help">Could not list them ({customsErr.slice(0, 140)}).</p> : null}
+        {customs === null ? (
+          <Spinner label="Loading…" />
+        ) : !customs.enabled ? (
+          <p className="text-sm muted">{customs.reason}</p>
+        ) : customs.agents.length === 0 ? (
+          <p className="text-sm muted">None yet.</p>
+        ) : (
+          <CardList
+            items={customs.agents}
+            noun="custom agents"
+            keyOf={(c) => c.id}
+            text={(c) => `${c.name} ${c.description}`}
+            render={(c) => (
+              <button
+                type="button"
+                onClick={() => setView({ v: "customPage", id: c.id })}
+                className="card flex w-full flex-col p-5 text-left transition hover:border-[var(--brand)]"
+                title={c.name}
+              >
+                <span className="flex items-start justify-between gap-3">
+                  <h4 className="line-clamp-2 text-base font-semibold leading-snug">{middleShort(c.name)}</h4>
+                  <ReleasePill status={c.latest.status} label={c.latest.status_label} />
+                </span>
+                <p className="mt-1.5 line-clamp-3 text-sm muted">{c.description}</p>
+                <p className="mt-auto pt-4 text-[13px] faint">
+                  Version {c.latest.version}
+                  {c.live_version && c.live_version !== c.latest.version ? ` · version ${c.live_version} is live` : ""}
+                </p>
+              </button>
+            )}
           />
         )}
       </BuiltSection>

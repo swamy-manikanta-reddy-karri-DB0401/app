@@ -955,10 +955,15 @@ def ask_genie(space_id: str, question: str, tok: str, wait: int = 120) -> dict:
 
 
 def ask_other(spec: dict, name: str, question: str, tok: str, who: dict, depth: int) -> dict:
-    """Ask another assistant the person can use; its tools that change something are never run from here."""
+    """Ask another assistant the person can use, under that assistant's own tool policy (exactly as if
+    the person asked it directly). A tool call that would wait for the person is not run from here.
+
+    Learnt live (2026-11-02): pausing on *every* tool request blocked the Weather assistant's
+    read-only web lookup, and the agent reported "no live weather data"; asked directly it answered."""
     import access
     import app_agents
     import chat
+    import toolpolicy
 
     target = next((a for a in spec["assistants"] if a["name"] == name), None)
     if not target:
@@ -974,9 +979,11 @@ def ask_other(spec: dict, name: str, question: str, tok: str, who: dict, depth: 
         out = ask(other, history, tok, who, mode="nested", depth=depth + 1)
     else:
         where = app_agents.target(agent) if agent.get("app_name") else agent["name"]
-        out = chat.ask(where, agent["task"], history, tok, ask_person=lambda r: True)
+        mode = toolpolicy.mode_of(agent.get("tool_approval") or "")
+        out = chat.ask(where, agent["task"], history, tok, ask_person=lambda r: toolpolicy.needs_person(r, mode, tok))
     if out.get("pause"):
-        return {"error": "%s wants to make a change, which needs the person's approval. Tell the person to ask %s directly." % (name, name)}
+        return {"error": "%s needs the person's approval to use one of its tools, which cannot be given from here, so it "
+                         "did not answer. Tell the person to ask %s directly." % (name, name)}
     return {"answer": (out.get("reply") or "")[:8000], "tools": out.get("tools") or []}
 
 

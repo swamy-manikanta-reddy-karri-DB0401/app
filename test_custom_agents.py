@@ -330,6 +330,34 @@ def _():
     assert ran == ["get_rates"] and "Not run, because this is a test" in tested["reply"]
 
 
+@case("another assistant is asked under its own tool policy: its lookups run, a change it would ask about is not")
+def _():
+    import access
+    import chat
+    import toolpolicy
+
+    fresh()
+    seen = []
+    other = {"name": "mas-1", "task": "agent/v1/responses", "ready": True, "tool_approval": ""}
+    access.visible_agents = lambda who, app_tok, tok="": [other]
+    lookup = {"name": "web_search", "server_label": "sandbox"}
+    change = {"name": "save_plan", "server_label": "planner"}
+    toolpolicy.tools_of = lambda server, tok: {"web_search": {"read_only": True}} if server == "sandbox" else {}
+
+    def fake_ask(where, task, history, tok, ask_person=None, **kw):
+        seen.append([ask_person(lookup), ask_person(change)])
+        return {"reply": "12C and cloudy", "tools": ["sandbox"]}
+
+    chat.ask = fake_ask
+    spec = ca.clean(dict(RAW, documents=[], assistants=[{"key": "mas-1", "name": "Weather"}]))
+    out = ca.ask_other(spec, "Weather", "Weather in London?", "TOK", PERSON, 0)
+    assert out["answer"] == "12C and cloudy"
+    assert seen == [[False, False]]  # default policy (auto): nothing waits, as when asked directly
+    other["tool_approval"] = "changes"
+    ca.ask_other(spec, "Weather", "Weather in London?", "TOK", PERSON, 0)
+    assert seen[-1] == [False, True]  # the lookup runs; only the change would wait (and is then refused)
+
+
 @case("the chat routes send a custom agent's question to it, and carry on after a decision")
 def _():
     from fastapi.testclient import TestClient

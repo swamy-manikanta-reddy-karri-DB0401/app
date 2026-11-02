@@ -33,7 +33,7 @@ VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
 def repo() -> str:
-    r = os.environ.get("DEPLOYER_REPO") or "manikantakarri-oss/app"
+    r = os.environ.get("DEPLOYER_REPO") or "swamy-manikanta-reddy-karri-DB0401/app"
     if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", r):
         raise DeployError("DEPLOYER_REPO must be owner/name.", 500)
     return r

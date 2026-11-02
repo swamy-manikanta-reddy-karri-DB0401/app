@@ -15,7 +15,7 @@ command:
 env:
   # GitHub repository holding the portal, the workflows and the client environments.
   - name: DEPLOYER_REPO
-    value: manikantakarri-oss/app
+    value: swamy-manikanta-reddy-karri-DB0401/app
   - name: DEPLOYER_REF
     value: main
   # Who may use the deployer (a workspace group).

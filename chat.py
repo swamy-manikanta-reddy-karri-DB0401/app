@@ -33,16 +33,47 @@ def _detail(body: str, fallback: str) -> str:
     return fallback
 
 
+def _is_app(endpoint: str) -> bool:
+    """A full URL is an agent running as its own Databricks App (see app_agents)."""
+    return endpoint.startswith("https://")
+
+
 def _post(endpoint: str, payload: dict, user_tok: str) -> httpx.Response:
+    url = endpoint if _is_app(endpoint) else host() + "/serving-endpoints/" + endpoint + "/invocations"
     try:
-        return http().post(
-            host() + "/serving-endpoints/" + endpoint + "/invocations",
+        resp = http().post(
+            url,
             headers={"Authorization": "Bearer " + user_tok, "Content-Type": "application/json"},
             json=payload,
             timeout=600,
         )
     except httpx.RequestError as exc:
         raise DbxError("could not reach the agent endpoint: " + str(exc), 504)
+    if _is_app(endpoint):
+        _app_refusal(endpoint, resp)
+    return resp
+
+
+def _app_refusal(url: str, resp: httpx.Response) -> None:
+    """An app's front door (the Apps proxy) answers a token it does not accept with a
+    redirect to sign in or a 401/403, sometimes as a web page. That is never the agent's
+    answer: say so and point at the app, where the person signs in themselves. The portal
+    does not retry as its own identity (the security model forbids it)."""
+    base = url.split("/", 3)
+    base = "/".join(base[:3]) if len(base) >= 3 else url
+    ctype = resp.headers.get("content-type", "")
+    if resp.status_code in (301, 302, 303, 307, 308, 401, 403) or (resp.status_code < 300 and "text/html" in ctype):
+        raise DbxError(
+            "This agent runs as its own app and did not accept your sign-in from the portal "
+            "(Databricks answered %s). You can open it directly: %s" % (resp.status_code, base),
+            403,
+        )
+    if resp.status_code in (404, 405):
+        raise DbxError(
+            "The agent's app has no question address at %s (Databricks answered %s). An admin can change "
+            "the address in its settings on the Build page." % (url[len(base):] or "/", resp.status_code),
+            502,
+        )
 
 
 def _body(resp: httpx.Response) -> dict | None:
@@ -160,18 +191,23 @@ def ask(
             history.append({"role": "user", "content": note})
 
     payload, field = adapters.build(task, endpoint, history)
-    if not (payload.get("input") or payload.get("messages")):
+    if not (payload.get("input") or payload.get("messages") or payload.get("message")):
         raise DbxError("nothing to send", 400)
 
     resp = _post(endpoint, payload, user_tok)
 
-    # Wrong request field? The endpoint says so in the 400. Switch once.
+    # Wrong request field? The endpoint says so in the 400. Switch once (an app agent may
+    # take any of three shapes, so it tries each).
     if resp.status_code >= 400 and adapters.wrong_field(resp.status_code, resp.text):
-        alt = adapters.other_field(field)
-        payload = {alt: payload[field]}
-        resp = _post(endpoint, payload, user_tok)
-        if resp.status_code < 400:
-            adapters.learn(endpoint, alt)
+        others = [f for f in adapters.APP_FIELDS if f != field] if _is_app(endpoint) else [adapters.other_field(field)]
+        for alt in others:
+            payload = adapters.shaped(alt, history)
+            resp = _post(endpoint, payload, user_tok)
+            if resp.status_code < 400:
+                adapters.learn(endpoint, alt)
+                break
+            if not adapters.wrong_field(resp.status_code, resp.text):
+                break
     elif resp.status_code < 400:
         adapters.learn(endpoint, field)
 

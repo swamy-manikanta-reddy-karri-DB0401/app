@@ -11,6 +11,7 @@ const KIND_PLAIN: Record<string, string> = {
   supervisor: "Uses several tools",
   knowledge: "Answers from documents",
   agent: "Custom assistant",
+  custom: "Built in code",
 };
 
 /** Label, icon and colour family for each kind, shared by the cards, the

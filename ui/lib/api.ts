@@ -18,6 +18,10 @@ export type Agent = {
   accepts: string[];
   supports_files: boolean;
   access_reason?: string;
+  /** A custom-code agent: the Databricks App it runs as, and its address there. */
+  app_name?: string;
+  app_url?: string;
+  path?: string;
   metered?: boolean;
   light?: boolean;
 };
@@ -477,7 +481,41 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T>
   return data as T;
 }
 
+/** A Databricks App an admin could offer as a custom-code agent. */
+export type AppCandidate = {
+  name: string;
+  description: string;
+  running: boolean;
+  state: string;
+  url: string;
+  registered: boolean;
+};
+
+/** What an admin sets for a custom-code agent; the app itself is not changed. */
+export type AppAgentSpec = {
+  app_name: string;
+  display_name: string;
+  blurb: string;
+  path: string;
+  upload_volume: string;
+  accepts: string;
+  output_volume: string;
+  share?: { kind: "group" | "user"; principal: string }[];
+};
+
 export const api = {
+  appAgents: () => request<{ enabled: boolean; reason?: string; agents: Agent[] }>("/api/admin/app-agents"),
+  appAgentApps: () => request<{ apps: AppCandidate[] }>("/api/admin/app-agents/apps"),
+  appAgentCheck: (name: string) =>
+    request<{ found: boolean; running: boolean; state?: string; url?: string; description?: string; message: string }>(
+      `/api/admin/app-agents/check?name=${encodeURIComponent(name)}`
+    ),
+  appAgentTry: (body: { app_name: string; path: string; message?: string }) =>
+    request<{ ok: boolean; reply?: string; tools?: string[]; seconds?: number; message?: string }>("/api/admin/app-agents/try", body),
+  appAgentAdd: (spec: AppAgentSpec) => request<{ agent: Agent; warnings: string[] }>("/api/admin/app-agents", spec),
+  appAgentSave: (name: string, spec: Omit<AppAgentSpec, "app_name" | "share">) =>
+    send<{ agent: Agent }>("PUT", `/api/admin/app-agents/${encodeURIComponent(name)}`, spec),
+  appAgentRemove: (name: string) => send<{ removed: string }>("DELETE", `/api/admin/app-agents/${encodeURIComponent(name)}`),
   session: () => request<Session>("/api/session"),
   agents: () => request<{ agents: Agent[] }>("/api/agents"),
   chat: (

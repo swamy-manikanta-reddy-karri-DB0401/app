@@ -650,7 +650,7 @@ def _():
     api.calls.clear()
     uninstall.run(api, c, lambda s: None, history=True)
     drops = [x[2]["statement"] for x in api.calls if x[1] == "/api/2.0/sql/statements"]
-    assert drops == ["DROP TABLE IF EXISTS `cat`.`sch`.`%s`" % t for t in ("portal_logs", "portal_chats", "portal_events")], drops
+    assert drops == ["DROP TABLE IF EXISTS `cat`.`sch`.`%s`" % t for t in ("portal_logs", "portal_chats", "portal_events", "portal_app_agents")], drops
 
 
 @case("uninstall: a refusal fails the job, so the deployer keeps the client to retry")

@@ -639,7 +639,19 @@ function Message({
       <div className="flex gap-3">
         <Avatar />
         <div className="min-w-0 flex-1">
-          <div className="error whitespace-pre-wrap">{turn.text}</div>
+          <div className="error whitespace-pre-wrap break-words">
+            {/* An agent running as its own app may refuse the portal's sign-in; its message ends with
+                the app's address, which should open in a new tab. Only https links are made clickable. */}
+            {turn.text.split(/(https:\/\/[^\s<>"']+)/).map((part, i) =>
+              i % 2 ? (
+                <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="underline">
+                  {part}
+                </a>
+              ) : (
+                part
+              )
+            )}
+          </div>
           {onRetry ? (
             <button type="button" className="btn btn-quiet mt-2" onClick={onRetry}>
               <RefreshIcon size={15} /> Try that again

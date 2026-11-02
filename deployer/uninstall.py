@@ -4,7 +4,8 @@ service principal.
 
 Removed: the portal app (its own service principal and everyone's access to it
 go with it) and its release folders; and, only when asked, the portal's chat
-history, activity and problem tables.
+history, activity and problem tables, and its list of custom-code agents
+(`portal_app_agents`; kept otherwise, so a reinstall offers them again).
 
 Kept, on purpose: the client's assistants, and the tools (MCP apps) the portal
 installed, with their keys in the `agent-portal` secret scope and their code in
@@ -20,7 +21,7 @@ from __future__ import annotations
 from common import TABLE_RE, Api, DeployError
 import workspace as ws
 
-HISTORY_TABLES = ("portal_logs", "portal_chats", "portal_events")
+HISTORY_TABLES = ("portal_logs", "portal_chats", "portal_events", "portal_app_agents")
 
 
 def _gone(exc: DeployError) -> bool:

@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import access
+import app_agents
 import attachments
 import audit
 import builder
@@ -200,9 +201,14 @@ def send(
     # something about the request, and stays out of per-assistant reliability.
     events.note(label=agent.get("display_name"), detail={"files": len(uploads), "known": True})
     output_dir = filestore.output_dir_path(agent["output_volume"]) if agent.get("output_volume") else ""
-    out = chat.ask(endpoint, agent["task"], history, tok, files=uploads, output_dir=output_dir,
+    out = chat.ask(_transport(agent), agent["task"], history, tok, files=uploads, output_dir=output_dir,
                    ask_person=_policy(agent, tok))
     return _answered(out, endpoint, who, tok, payload, history, background, len(uploads))
+
+
+def _transport(agent: dict) -> str:
+    """Where a question goes: the serving endpoint's name, or a custom-code agent's app address."""
+    return app_agents.target(agent) if agent.get("app_name") else agent["name"]
 
 
 def _policy(agent: dict, tok: str):
@@ -286,7 +292,7 @@ def chat_decide(
     no = [named[i] for i in pause.get("asked") or [] if not decisions.get(i)]
     # The person's decision is the audit record, under their own identity; never the arguments.
     events.note(label=agent.get("display_name"), detail={"known": True, "approved": yes, "declined": no})
-    out = chat.resume(endpoint, pause, decisions, tok, ask_person=_policy(agent, tok))
+    out = chat.resume(_transport(agent), pause, decisions, tok, ask_person=_policy(agent, tok))
     return _answered(out, endpoint, who, tok, payload, history, background, extra={"approved": yes, "declined": no})
 
 
@@ -419,7 +425,11 @@ def grant(payload: dict = Body(...), x_forwarded_access_token: str = Header(None
     # Resolve the whole agent: an Agent Bricks agent is governed by its own
     # permission list, not the serving endpoint's, and only the shaped record
     # knows which.
-    target = next((a for a in access.all_agents(tok) if a["id"] == endpoint_id), None)
+    if app_agents.is_key(endpoint_id):
+        row = app_agents.find(endpoint_id)
+        target = app_agents.shape(row, None) if row else None
+    else:
+        target = next((a for a in access.all_agents(tok) if a["id"] == endpoint_id), None)
     if not target:
         target = {"id": endpoint_id}
     events.note(
@@ -472,6 +482,8 @@ def meta(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)
     if not values:
         raise HTTPException(400, "nothing to update")
     tok = app_token()
+    if app_agents.is_key(name):
+        return _app_agent_meta(who, name, values)
     target = next((a for a in access.all_agents(tok) if a["name"] == name), None)
     if not target:
         raise HTTPException(404, "no such agent")
@@ -483,6 +495,134 @@ def meta(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)
             "appears. Ask its owner to grant you CAN_MANAGE.",
         )
     return access.set_meta(name, values, tok)
+
+
+def _app_agent_meta(who: dict, name: str, values: dict) -> dict:
+    """Settings of a custom-code agent live in the portal's table, not in tags."""
+    row = app_agents.find(name)
+    if not row:
+        raise HTTPException(404, "no such agent")
+    events.note(label=row.get("display_name"))
+    if not app_agents.may_manage(row["app_name"], who):
+        raise HTTPException(403, "You need Can Manage on this app in Databricks to change it. Ask its owner.")
+    changes = {k: values[k] for k in app_agents.FIELDS if k in values}
+    if not changes:
+        raise HTTPException(400, "Only the name, description, address and file folders of a custom agent can be changed here.")
+    return {"agent": app_agents.save(row["app_name"], changes, who["user_name"])}
+
+
+# --------------------------------------------------------------- custom-code agents (apps)
+
+
+@app.get("/api/admin/app-agents")
+def app_agent_list(x_forwarded_access_token: str = Header(None)):
+    """The custom-code agents registered in the portal, with whether each is running."""
+    _require_admin(x_forwarded_access_token)
+    if not app_agents.enabled():
+        return {"enabled": False, "reason": app_agents.OFF, "agents": []}
+    rows = app_agents.registered(fresh=True)
+    return {"enabled": True, "agents": [app_agents.shape(r, app_agents.app_info(r["app_name"])) for r in rows]}
+
+
+@app.get("/api/admin/app-agents/apps")
+def app_agent_apps(x_forwarded_access_token: str = Header(None)):
+    """Apps in this workspace an admin could offer as an agent."""
+    _, tok = _require_admin(x_forwarded_access_token)
+    return {"apps": app_agents.candidates(tok)}
+
+
+@app.get("/api/admin/app-agents/check")
+def app_agent_check(name: str, x_forwarded_access_token: str = Header(None)):
+    _, tok = _require_admin(x_forwarded_access_token)
+    return app_agents.check(name.strip(), tok)
+
+
+@app.post("/api/admin/app-agents/try")
+def app_agent_try(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Send one message to the app as the admin, to see that the portal and the app understand
+    each other before anyone else is given it. A failure is a result, not an error."""
+    _, tok = _require_admin(x_forwarded_access_token)
+    name = (payload.get("app_name") or "").strip()
+    message = (payload.get("message") or "").strip()[:2000] or "Hello. In one sentence, what can you help with?"
+    path = app_agents.clean({"path": payload.get("path") or ""})["path"]
+    info = app_agents.check(name, tok)
+    if not info["running"]:
+        return {"ok": False, "message": info["message"]}
+    url = info["url"].rstrip("/") + path
+    started = time.monotonic()
+    try:
+        out = chat.ask(url, "app", [{"role": "user", "content": message}], tok)
+    except DbxError as exc:
+        return {"ok": False, "message": str(exc)[:600]}
+    return {"ok": True, "reply": (out.get("reply") or "")[:4000], "tools": (out.get("tools") or [])[:10],
+            "seconds": round(time.monotonic() - started, 1)}
+
+
+def _app_agent_access(app_name: str, share: list) -> list:
+    """Give the chosen teams and people Can use on the app. Returns plain warnings."""
+    warnings = []
+    target = {"app_name": app_name, "id": app_agents.key(app_name)}
+    for s in share or []:
+        kind = (s or {}).get("kind")
+        principal = str((s or {}).get("principal") or "").strip()
+        if kind not in ("user", "group") or not principal:
+            continue
+        try:
+            access.set_grant(target, kind, principal, "CAN_QUERY", app_token())
+        except DbxError as exc:
+            warnings.append("Could not give %s access: %s" % (principal, str(exc)[:160]))
+    return warnings
+
+
+@app.post("/api/admin/app-agents")
+def app_agent_add(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Offer an app as an agent: share it with the portal, check this admin manages it, record
+    it, and give the chosen people access. The app itself is not changed otherwise."""
+    who, tok = _require_admin(x_forwarded_access_token)
+    name = (payload.get("app_name") or "").strip()
+    events.note(action="created_assistant", target=app_agents.key(name), label=payload.get("display_name"),
+                detail={"type": "Custom agent"})
+    if not app_agents.enabled():
+        raise HTTPException(503, app_agents.OFF)
+    info = app_agents.check(name, tok)
+    if not info["found"]:
+        raise HTTPException(404, info["message"])
+    problem = app_agents.share_with_portal(name, tok)
+    if problem:
+        raise HTTPException(403, problem)
+    if not app_agents.may_manage(name, who):
+        raise HTTPException(403, "You need Can Manage on the app %s in Databricks to offer it here. Ask its owner." % name)
+    values = {k: payload.get(k) for k in app_agents.FIELDS if k in payload}
+    row = app_agents.save(name, values, who["user_name"])
+    warnings = _app_agent_access(name, payload.get("share") or [])
+    if not info["running"]:
+        warnings.append(info["message"])
+    return {"agent": app_agents.shape(row, app_agents.app_info(name)), "warnings": warnings}
+
+
+@app.put("/api/admin/app-agents/{name}")
+def app_agent_edit(name: str, payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_admin(x_forwarded_access_token)
+    events.note(action="edited_assistant", target=app_agents.key(name), label=payload.get("display_name"),
+                detail={"type": "Custom agent"})
+    values = {k: payload.get(k) for k in app_agents.FIELDS if k in payload}
+    return _app_agent_meta(who, app_agents.key(name), values)
+
+
+@app.delete("/api/admin/app-agents/{name}")
+def app_agent_remove(name: str, x_forwarded_access_token: str = Header(None)):
+    """Stop offering it here. The app and who may use it in Databricks are left as they are."""
+    who, _ = _require_admin(x_forwarded_access_token)
+    row = app_agents.find(name)
+    events.note(action="deleted_assistant", target=app_agents.key(name), label=(row or {}).get("display_name"),
+                detail={"type": "Custom agent"})
+    if not row:
+        raise HTTPException(404, "no such agent")
+    # A deleted or never-shared app can still be taken off the list; otherwise only by a manager.
+    if app_agents.app_info(name) is not None and not app_agents.may_manage(name, who):
+        raise HTTPException(403, "You need Can Manage on this app in Databricks to remove it. Ask its owner.")
+    app_agents.remove(name)
+    return {"removed": name}
 
 
 @app.get("/api/admin/builder/types")
@@ -686,9 +826,14 @@ def genie_delete(space_id: str, x_forwarded_access_token: str = Header(None)):
 def _names(tok: str) -> dict:
     """Endpoint name -> the friendly name people know it by (cosmetic only)."""
     try:
-        return {a["name"]: a["display_name"] for a in access.all_agents(tok)}
+        names = {a["name"]: a["display_name"] for a in access.all_agents(tok)}
     except DbxError:
-        return {}
+        names = {}
+    try:
+        names.update({app_agents.key(r["app_name"]): r["display_name"] for r in app_agents.registered()})
+    except DbxError:
+        pass
+    return names
 
 
 @app.get("/api/dashboard/me")
@@ -1064,7 +1209,7 @@ def designer_test_run(payload: dict = Body(...), x_forwarded_access_token: str =
         raise HTTPException(409, "The assistant is still starting.")
     out_dir = filestore.output_dir_path(agent["output_volume"]) if agent.get("output_volume") else ""
     try:
-        out = chat.ask(endpoint, agent["task"], [{"role": "user", "content": question}], tok, output_dir=out_dir)
+        out = chat.ask(_transport(agent), agent["task"], [{"role": "user", "content": question}], tok, output_dir=out_dir)
     except DbxError as exc:
         return {"verdict": "fail", "reason": "It did not answer: " + str(exc)[:200], "answer": ""}
     broken = events.tool_failure(out.get("reply") or "")

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, BuilderTool, DesignerInfo, FileSettings, McpEntry, SourceItem, ToolType } from "@/lib/api";
+import { Agent, api, BuilderTool, DesignerInfo, FileSettings, McpEntry, SourceItem, ToolType } from "@/lib/api";
 import { CardList, Empty, ErrorBox, Select, Spinner, Tag, useLoad } from "./bits";
 import { middleShort } from "@/lib/people";
 import { ArrowRightIcon, CheckIcon, PlusIcon, SparkleIcon } from "./icons";
@@ -9,6 +9,7 @@ import { Access, AccessStep, Done, Finished, Section, VolumeField, WizardFrame }
 import { KnowledgeWizard } from "./KnowledgeBuilder";
 import { GenieWizard } from "./GenieBuilder";
 import { Designer } from "./Designer";
+import { AppAgentWizard } from "./AppAgentBuilder";
 import { ChosenRow, isCatalogTool, McpPicker, ToolProgress, ToolWait } from "./McpCatalog";
 
 type Row = Awaited<ReturnType<typeof api.builderAgents>>["agents"][number];
@@ -125,7 +126,10 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
     | { v: "genie"; id: string | null }
     | { v: "docs"; id: string | null }
     | { v: "designer" }
+    | { v: "app"; agent: Agent | null }
   >({ v: "home" });
+  const [apps, setApps] = useState<{ enabled: boolean; reason?: string; agents: Agent[] } | null>(null);
+  const [appsErr, setAppsErr] = useState("");
   // The "describe it in your own words" beta: offered unless an operator switched it off. When it is
   // on but this admin has no AI model to use, it is shown with the reason, not hidden.
   const [designer, setDesigner] = useState<DesignerInfo | null>(null);
@@ -153,6 +157,13 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
       setKas([]);
       setKasErr(e.message);
     }
+    setAppsErr("");
+    try {
+      setApps(await api.appAgents());
+    } catch (e: any) {
+      setApps({ enabled: false, agents: [] });
+      setAppsErr(e.message);
+    }
   }
   useEffect(() => {
     load();
@@ -176,6 +187,9 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
   }
   if (view.v === "genie") {
     return <GenieWizard id={view.id} onCancel={() => setView({ v: "home" })} onFinished={finished} />;
+  }
+  if (view.v === "app") {
+    return <AppAgentWizard editing={view.agent} onCancel={() => setView({ v: "home" })} onFinished={finished} />;
   }
   if (view.v === "designer") {
     return <Designer onCancel={() => setView({ v: "home" })} onFinished={finished} />;
@@ -280,6 +294,24 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
               <span className="mt-3 block text-[13px] faint">Good for: sales, finance and operations numbers</span>
             </span>
           </button>
+          <button
+            type="button"
+            className="choice !p-6"
+            aria-pressed={false}
+            disabled={apps !== null && !apps.enabled}
+            onClick={() => setView({ v: "app", agent: null })}
+          >
+            <span>
+              <span className="block text-lg font-semibold">Add an agent built in code</span>
+              <span className="mt-1 block text-[15px] muted">
+                Your developers wrote an agent and run it as an app in Databricks. Add it here so people can chat with it
+                like any other assistant.
+              </span>
+              <span className="mt-3 block text-[13px] faint">
+                {apps !== null && !apps.enabled ? apps.reason : "Good for: agents your team already built in code"}
+              </span>
+            </span>
+          </button>
         </div>
       </div>
     );
@@ -350,6 +382,31 @@ export function Builder({ onGoto }: { onGoto?: (tab: string) => void }) {
             keyOf={(k) => k.ka_id}
             text={(k) => `${k.display_name || ""} ${k.description || ""}`}
             render={(k) => <EditCard title={k.display_name} description={k.description} onOpen={() => setView({ v: "docs", id: k.ka_id })} />}
+          />
+        )}
+      </BuiltSection>
+
+      <BuiltSection title="Agents built in code" sub="Agents your developers run as apps in Databricks, offered here.">
+        {appsErr ? <p className="help">Could not list them ({appsErr.slice(0, 140)}).</p> : null}
+        {apps === null ? (
+          <Spinner label="Loading…" />
+        ) : !apps.enabled ? (
+          <p className="text-sm muted">{apps.reason}</p>
+        ) : apps.agents.length === 0 ? (
+          <p className="text-sm muted">None yet.</p>
+        ) : (
+          <CardList
+            items={apps.agents}
+            noun="agents"
+            keyOf={(a) => a.name}
+            text={(a) => `${a.display_name} ${a.blurb || ""} ${a.app_name || ""}`}
+            render={(a) => (
+              <EditCard
+                title={a.display_name}
+                description={(a.ready ? "" : "Not running. ") + (a.blurb || a.app_name || "")}
+                onOpen={() => setView({ v: "app", agent: a })}
+              />
+            )}
           />
         )}
       </BuiltSection>

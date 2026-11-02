@@ -19,6 +19,7 @@ import os
 import re
 import time
 
+import app_agents
 from dbx import AGENT_TASK_PREFIX, PORTAL_TAG, QUERYABLE, DbxError, app_token, call
 
 ADMIN_GROUP = "admins"
@@ -226,6 +227,9 @@ def perm_paths(agent: dict) -> list:
     let them keep editing an agent they were supposedly removed from, and it
     makes the two screens disagree.
     """
+    if agent.get("app_name"):
+        # A custom-code agent is an app: its own list is the only one (see app_agents).
+        return [APP_PERMS + agent["app_name"]]
     paths = []
     if agent.get("id"):
         paths.append(ENDPOINT_PERMS + agent["id"])
@@ -349,7 +353,7 @@ def visible_agents(who: dict, app_tok: str, user_tok: str = "") -> list:
         except DbxError:
             pass
         out.append(dict(agent, access_reason=reason or "granted in Databricks"))
-    return out
+    return out + app_agents.visible(who)
 
 
 def admin_agents(app_tok: str, user_tok: str = "", who: dict | None = None) -> list:
@@ -376,7 +380,7 @@ def admin_agents(app_tok: str, user_tok: str = "", who: dict | None = None) -> l
         out.append(
             dict(agent, grants=rows, acl_error=err, manageable=err is None, you_can_manage=mine)
         )
-    return out
+    return out + (app_agents.for_admin(who or {}))
 
 
 def principals(app_tok: str) -> dict:
@@ -431,6 +435,10 @@ def set_grant(agent, kind: str, principal: str, level, app_tok: str) -> dict:
     paths = perm_paths(agent)
     if not paths:
         raise DbxError("this agent has no permission list to change", 404)
+
+    if level and paths[0].startswith(APP_PERMS):
+        # An app knows only Can use and Can manage: "may ask it questions" is Can use.
+        level = "CAN_MANAGE" if level == "CAN_MANAGE" else "CAN_USE"
 
     if level:
         # The serving endpoint list is what actually permits calling the agent,

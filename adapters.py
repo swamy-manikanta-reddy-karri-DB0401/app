@@ -54,10 +54,22 @@ def _turns(history: list) -> list:
 def build(task: str, endpoint: str, history: list) -> tuple:
     """Return (payload, request_field) for this endpoint."""
     field = _learned.get(endpoint) or field_for_task(task)
+    return shaped(field, history), field
+
+
+def shaped(field: str, history: list) -> dict:
+    """The request body for one wire format.
+
+    `message` is the shape hand-written agent apps tend to take (seen live: a FastAPI agent
+    whose body is `{"message": str, "history": [...]}`): the newest question on its own and
+    the earlier turns beside it."""
     turns = _turns(history)
-    if field == "input":
-        return {"input": turns}, "input"
-    return {"messages": turns}, "messages"
+    if field == "message":
+        last = next((i for i in range(len(turns) - 1, -1, -1) if turns[i]["role"] == "user"), None)
+        if last is None:
+            return {"message": "", "history": turns}
+        return {"message": turns[last]["content"], "history": turns[:last]}
+    return {field: turns}
 
 
 def field_for_task(task: str) -> str:
@@ -67,11 +79,16 @@ def field_for_task(task: str) -> str:
         return "messages"
     # Unknown or absent task: agents outnumber raw models in a portal, and the
     # Responses schema is the current default for Agent Bricks, so start there.
-    return "input" if task.startswith("agent/") else "messages"
+    return "input" if task.startswith("agent/") or task == "app" else "messages"
 
 
 def other_field(field: str) -> str:
     return "messages" if field == "input" else "input"
+
+
+# An agent running as its own app may take any of these; tried in this order (the first is
+# what Databricks' agent templates and the Agent Bricks runtime take).
+APP_FIELDS = ("input", "messages", "message")
 
 
 def learn(endpoint: str, field: str) -> None:
@@ -168,7 +185,8 @@ def wrong_field(status: int, body: str) -> bool:
         "model is missing inputs",
         "failed to enforce schema",
     )
-    return any(h in b for h in hints) and ("input" in b or "messages" in b)
+    # "message" also covers "messages", and the field a hand-written app names when it is missing.
+    return any(h in b for h in hints) and ("input" in b or "message" in b)
 
 
 # -------------------------------------------------------------------- responses
@@ -301,9 +319,17 @@ def parse(data) -> dict:
         if isinstance(msg, dict) and msg.get("role") in (None, "assistant"):
             _walk_content(msg.get("content"), text, seen, cites)
 
+    # A hand-written agent app's own list of the tools it ran.
+    for tc in data.get("tool_calls") if isinstance(data.get("tool_calls"), list) else []:
+        name = (tc.get("name") or tc.get("tool") or (tc.get("function") or {}).get("name")) if isinstance(tc, dict) else None
+        if name:
+            tools.append(str(name))
+
     # 4. Agent Bricks supervisors wrap the answer, and MLflow models use
     #    predictions. Both appear in the wild; unwrap one level.
-    for key in ("final_response", "response", "answer", "result", "output_text"):
+    # `reply` / `message` / `text`: what hand-written agent apps answer with (seen live:
+    # `{"reply": ..., "tool_calls": [...]}`). Only a plain string counts.
+    for key in ("final_response", "response", "answer", "result", "output_text", "reply", "message", "text"):
         if isinstance(data.get(key), str):
             _push(seen, text, data[key])
     preds = data.get("predictions")

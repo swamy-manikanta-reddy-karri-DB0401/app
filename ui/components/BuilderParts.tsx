@@ -18,7 +18,7 @@ export type Finished = {
   access?: number;
   /** "data" is a Genie space; "docs" a Knowledge Assistant; chat says a chat
    *  version was also created (Genie only). */
-  variant?: "assistant" | "data" | "docs";
+  variant?: "assistant" | "data" | "docs" | "app";
   chat?: boolean;
   /** Ready-made tools still being deployed; each is added to the assistant when it is up. */
   deploying?: string[];
@@ -49,6 +49,9 @@ export function Done({
   if (done.kind === "deleted") {
     title = data ? "Data assistant deleted" : docs ? "Document assistant deleted" : "Assistant deleted";
     body = `“${done.name}” has been removed.`;
+  } else if (created && done.variant === "app") {
+    title = "Your custom agent is in the portal";
+    body = `“${done.name}” now appears under “Your assistants” for the people who may use its app. Nothing in the app itself was changed.`;
   } else if (created && docs) {
     title = "Your document assistant is on its way";
     body = `“${done.name}” has been created. Databricks now reads your documents, which can take several minutes (longer for big folders), before anyone can chat with it.`;
@@ -106,7 +109,11 @@ export function Done({
             <li className="flex gap-3">
               <span className="step-num shrink-0">1</span>
               <span>
-                {n && chat ? (
+                {n && done.variant === "app" ? (
+                  <>
+                    <b>The {who} you chose can now use it.</b> You can check or change this any time.
+                  </>
+                ) : n && chat ? (
                   <>
                     <b>Access is being set up.</b> The {who} you chose will be able to use it as soon as it has
                     started. You can check or change this any time.
@@ -138,7 +145,8 @@ export function Done({
               <li className="flex gap-3">
                 <span className="step-num shrink-0">2</span>
                 <span>
-                  <b>Try it out.</b> After a few minutes it appears under “Your assistants”.
+                  <b>Try it out.</b>{" "}
+                  {done.variant === "app" ? "It is already under “Your assistants”." : "After a few minutes it appears under “Your assistants”."}
                   {onGoto ? (
                     <>
                       {" "}

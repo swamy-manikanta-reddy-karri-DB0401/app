@@ -9,7 +9,7 @@ Guidance for working in this repo. `README.md` has the long-form rationale and `
 - **End users** sign in, see only the agents they may use, and chat with them.
 - **Admins** (members of the workspace `admins` group) manage access, build agents, control foundation-model access, and view cost, activity and problems.
 
-**Core principle: the portal stores nothing of its own.** Agent identity, names, capabilities, access and the LLM switch all live in Databricks-native state (serving endpoint tags and ACLs, workspace groups, system tables). Delete and rebuild the portal and no configuration is lost. Don't add a local database or config file for state. The only tables the portal writes are the optional problem log and chat history in Delta (see below).
+**Core principle: the portal stores nothing of its own.** Agent identity, names, capabilities, access and the LLM switch all live in Databricks-native state (serving endpoint tags and ACLs, workspace groups, system tables). Delete and rebuild the portal and no configuration is lost. Don't add a local database or config file for state. The only tables the portal writes are the optional problem log, activity log and chat history in Delta, plus `portal_app_agents` (section 13: an app has no tags, so which apps are offered as agents has nowhere else to live; access still comes from the app's own permission list).
 
 ## Commands
 
@@ -22,6 +22,7 @@ python -m uvicorn app:app --port 8811           # http://127.0.0.1:8811  (#admin
 
 python test_adapters.py                         # offline: reply-parsing / wire-format cases
 python test_approvals.py                        # offline: tool calls waiting for the person, signed download permits
+python test_app_agents.py                       # offline: custom-code agents (Databricks Apps): shapes, refusals, access, registry
 python test_builder.py                          # offline: Supervisor Agent builder
 python test_genie.py                            # offline: Genie space builder
 python test_knowledge.py                        # offline: Knowledge Assistant builder
@@ -58,7 +59,7 @@ There is no linter or CI config. The offline tests are plain scripts (no pytest 
 - **New client / workspace:** set `PORTAL_LOG_TABLE` in `app.yaml` to `<existing catalog>.<schema>.portal_logs` (the only per-client line). The app creates the schema (`store.ensure_schema`, best effort) and its tables on first use (`store.ensure_table`: on Azure, `CREATE TABLE IF NOT EXISTS` is refused without CREATE TABLE even when the table exists, so a refused create falls back to checking the table is readable; if it is not, the error names the GRANTs to run) and picks a warehouse itself unless `PORTAL_LOG_WAREHOUSE` pins one. The SP needs `USE CATALOG` + `CREATE SCHEMA` on the catalog (or `USE SCHEMA` + `CREATE TABLE` on an existing schema) and `CAN_USE` on a warehouse.
 - **Onboarding an agent** = sharing its serving endpoint with the app's service principal (CAN_MANAGE). Until then it does not appear in the portal at all.
 
-Environment variables (all optional): `PORTAL_LOG_TABLE`, `PORTAL_LOG_WAREHOUSE`, `PORTAL_CHAT_TABLE`, `PORTAL_CHAT_RETENTION_DAYS` (default 180), `DATABRICKS_CONFIG_PROFILE`, `DATABRICKS_WORKSPACE_ID`. `.env.local` holds local `DATABRICKS_HOST`/`DATABRICKS_TOKEN`; it is gitignored. Never print, log or commit its contents.
+Environment variables (all optional): `PORTAL_LOG_TABLE`, `PORTAL_LOG_WAREHOUSE`, `PORTAL_CHAT_TABLE`, `PORTAL_APP_AGENTS_TABLE`, `PORTAL_CHAT_RETENTION_DAYS` (default 180), `DATABRICKS_CONFIG_PROFILE`, `DATABRICKS_WORKSPACE_ID`. `.env.local` holds local `DATABRICKS_HOST`/`DATABRICKS_TOKEN`; it is gitignored. Never print, log or commit its contents.
 
 ## Security model (do not weaken)
 
@@ -224,6 +225,13 @@ A separate Databricks App in **our** workspace that deploys the portal into clie
 - **The screen (designed for non-technical admins; checked in a real browser at desktop and phone width)**: four stages always shown (**Describe, Review, Create, Test**; only the current one is named on a phone). Describe is the interview beside a summary whose **checklist is in plain words** (`designer.progress`: "What it is for", "What it uses", "Who can use it", ...; the model-facing `check` strings, which say things like "record it in coverage", are never shown) with a progress bar and **the main button directly under it**, so it is on screen without scrolling (an earlier layout hid it below the fold). The conversation shows "Looked at your tables and your SQL warehouses" under replies, starter suggestions on the first turn, quick-answer buttons, and when ready an in-chat "Review and build / Change something". Errors from building sit beside the button (the chat's retry would re-ask the model). Review shows what a new tool can reach in words first, the code behind a labelled button (with line count and Copy), one tick per tool, and an action bar in the page's flow. Create lists every step with its state and, on failure, which step, with Try again (functions already made become ordinary tools so a retry never repeats them) and Back. Learnt from screenshots: **never fix anything to the bottom of the screen on a phone** (it covered the text box), **never link to `#something`** (this app navigates by the URL hash; use scroll-into-view), and **do not autofocus the text box on touch devices** (opens the keyboard and scrolls). The test suite does not cover the UI; it was driven with puppeteer against the real portal with the create/build/test calls faked.
 - Tests: `python test_designer.py` (scripted model, fake workspace, the real routes through `TestClient`).
 
+### 13. Custom-code agents (`app_agents.py`, UI `AppAgentBuilder.tsx`)
+An agent written in code (LangGraph, the Agent Bricks runtime, a hand-written FastAPI app) runs as its own **Databricks App**, not a serving endpoint. Build > Create assistant > **Add an agent built in code** offers one to portal users; it then appears in "Your assistants" (kind `custom`, "Built in code"), on Access, in chat history, Monitoring and the audit log like any other, under the key `app:<app name>`.
+- **Registry**: apps have no tags, so the portal keeps which apps it offers (name, description, address, optional `upload_volume`/`accepts`/`output_volume`) in Delta `portal_app_agents` beside `PORTAL_LOG_TABLE` (or `PORTAL_APP_AGENTS_TABLE`), created on first use, bound parameters only. Without a log table the option is shown disabled with the reason. Uninstall drops it only together with the history tables.
+- **Access**: the app's own permission list. Registering gives the portal's service principal CAN_MANAGE on the app (admin token first, portal identity only on a scope refusal) and requires the admin to hold CAN_MANAGE on it themselves. People see it only if the list (read as the portal) gives them CAN_USE/CAN_MANAGE directly or through a group; when the list cannot be read it is **hidden** (unlike endpoints, Apps user tokens cannot list apps, so Databricks cannot filter for us). Granting on Access writes CAN_USE to the app; a revoke keeps service-principal grants.
+- **Invocation**: `chat.ask` with the app's URL + address (default `/invocations`) and the **person's own token**, never the portal's. Shapes are probed in order Responses `input`, `messages`, then `{"message", "history"}` and learnt per URL; replies in `{"reply"}`/`{"text"}` with `tool_calls` are read. The Apps proxy refusing the token (302 to sign in, 401/403, or a web page) is reported as "open it directly: <app url>" (clickable in the chat); 404/405 names the address. The admin's "Send a test message" (`POST /api/admin/app-agents/try`) checks this before anyone is given access.
+- Learnt from the workspace (2026-11-02): an Agent Bricks custom agent (`databricks_agentkit.DurableAgentServer`) takes a message list; a hand-written IOAI agent takes `{"message", "history"}` on `/api/chat` and answers `{"reply", "tool_calls"}`; apps carry no tags. **Unconfirmed live:** whether the Apps proxy accepts a deployed portal's forwarded user token when calling another app (if not, people use the link; the portal will not call as itself). Starting a colleague's stopped agent app to test was not done.
+
 ## Layout
 
 ```
@@ -242,6 +250,7 @@ builder.py       Supervisor Agent create/edit/delete
 knowledge.py     Knowledge Assistant create/edit/delete (document folders as sources)
 genie.py         Genie space create/edit/delete + sharing (+ optional chat wrapper)
 mcps.py          MCP tool catalog from GitHub + deploy as Databricks Apps
+app_agents.py    custom-code agents running as Databricks Apps: registry (Delta), access from the app's permissions
 attachments.py   designer attachments: upload as the admin, read files for the model, key redaction
 connections.py   credentials for tools: secret store only, never shown to a model
 designer.py      natural-language interview -> draft -> builders; evals (beta)   designer_prompt.md  its instructions

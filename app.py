@@ -1361,6 +1361,22 @@ def health():
     return out
 
 
+class _Web(StaticFiles):
+    """The built UI. Its pages (index.html, 404.html, index.txt) name the hashed script files of
+    one release, and were sent with no caching rule, so browsers kept an old page after a deploy
+    (seen live 2026-11-02: a new Build option missing until a hard refresh). Pages are re-checked
+    every time (cheap: an unchanged page is a 304); the hashed files under _next/ never change
+    under one name, so they are kept for a year."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        if path.replace("\\", "/").startswith("_next/static/"):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 # Mounted last on purpose: every /api route above is registered first and so
 # still wins, while everything else falls through to the built UI.
-app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
+app.mount("/", _Web(directory=WEB, html=True), name="web")

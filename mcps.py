@@ -57,7 +57,7 @@ from dbx import DbxError, app_token, call, http
 
 log = logging.getLogger("portal.mcps")
 
-REPO = os.environ.get("PORTAL_MCP_REPO", "manikantakarri-oss/mcps")
+REPO = os.environ.get("PORTAL_MCP_REPO", "swamy-manikanta-reddy-karri-DB0401/mcps")
 REF = os.environ.get("PORTAL_MCP_REF", "main")
 # Only needed for a private repo (a read-only token). Never logged or returned.
 TOKEN = os.environ.get("PORTAL_MCP_TOKEN", "")

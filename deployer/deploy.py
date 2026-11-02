@@ -69,7 +69,7 @@ def config(env: dict) -> dict:
         "share_agents": (env.get("SHARE_AGENTS") or "all").strip().lower() != "none",
         # The MCP catalog: which repo, which version ("" = newest tag), and which
         # MCPs this client gets ("" or "*" = all, "none" = none, else a list).
-        "mcp_repo": (env.get("MCP_REPO") or "manikantakarri-oss/mcps").strip(),
+        "mcp_repo": (env.get("MCP_REPO") or "swamy-manikanta-reddy-karri-DB0401/mcps").strip(),
         "mcp_ref": (env.get("MCP_CATALOG") or "").strip(),
         "mcp_allow": _allow(env.get("MCP_ALLOW") or ""),
         "mcp_token": env.get("MCP_REPO_TOKEN") or "",
@@ -180,7 +180,10 @@ def _gh(token: str):
         headers["Authorization"] = "Bearer " + token
 
     def get(path):
-        r = httpx.get("https://api.github.com" + path, headers=headers, timeout=30)
+        # A moved or renamed repository answers 301 to its new id (seen live 2026-11-02: the
+        # catalog moved and the deploy said its version "was not found"). Same host, so the
+        # token is kept across the redirect.
+        r = httpx.get("https://api.github.com" + path, headers=headers, timeout=30, follow_redirects=True)
         if r.status_code >= 400:
             raise DeployError("GitHub refused %s (HTTP %d)." % (path.split("?")[0], r.status_code), 502)
         return r.json()

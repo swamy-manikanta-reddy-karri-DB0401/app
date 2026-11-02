@@ -70,7 +70,8 @@ def token() -> str:
 # is fast and does not count against the rate limit (5,000 an hour), so
 # reading 100 clients' settings again costs almost nothing when they have not
 # changed.
-_http = httpx.Client(timeout=30, limits=httpx.Limits(max_connections=32, max_keepalive_connections=16))
+# follow_redirects: a moved or renamed repository answers 301/307 to its new location (seen live).
+_http = httpx.Client(timeout=30, follow_redirects=True, limits=httpx.Limits(max_connections=32, max_keepalive_connections=16))
 _etags: dict = {}
 
 
@@ -221,7 +222,7 @@ def find_run(workflow: str, marker: str) -> dict | None:
 # --- the MCP catalog ----------------------------------------------------------
 
 def mcp_repo() -> str:
-    r = os.environ.get("MCP_REPO") or "manikantakarri-oss/mcps"
+    r = os.environ.get("MCP_REPO") or "swamy-manikanta-reddy-karri-DB0401/mcps"
     if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", r):
         raise DeployError("MCP_REPO must be owner/name.", 500)
     return r

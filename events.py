@@ -87,6 +87,7 @@ CATEGORY = {
     "approved_release": "build",
     "sent_back": "build",
     "retired_assistant": "build",
+    "restored_version": "build",
 }
 
 COLUMNS = ("at", "actor", "action", "category", "target", "label", "status", "http_status", "ms", "error_kind", "error", "detail")

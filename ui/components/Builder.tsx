@@ -2,17 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Agent, api, CustomSpec, CustomSummary, BuilderTool, DesignerInfo, FileSettings, McpEntry, SourceItem, ToolType } from "@/lib/api";
-import { CardList, Empty, ErrorBox, Select, Spinner, Tag, useLoad } from "./bits";
-import { middleShort } from "@/lib/people";
+import { ErrorBox, Select, Spinner, Tag, useLoad } from "./bits";
 import { ArrowRightIcon, CheckIcon, PlusIcon, SparkleIcon } from "./icons";
 import { Access, AccessStep, Done, Finished, Section, VolumeField, WizardFrame } from "./BuilderParts";
 import { KnowledgeWizard } from "./KnowledgeBuilder";
 import { GenieWizard } from "./GenieBuilder";
 import { Designer } from "./Designer";
 import { AppAgentWizard } from "./AppAgentBuilder";
+import { BuildLibrary, LibGroup, LibItem } from "./BuildLibrary";
+import { nameOf } from "@/lib/people";
 import { CustomWizard } from "./custom/CustomWizard";
 import { CustomAgentPage } from "./custom/CustomAgentPage";
-import { ReleasePill } from "./custom/parts";
 import { ChosenRow, isCatalogTool, McpPicker, ToolProgress, ToolWait } from "./McpCatalog";
 
 type Row = Awaited<ReturnType<typeof api.builderAgents>>["agents"][number];
@@ -114,12 +114,12 @@ function parseTypes(s: string): string[] {
 
 // ---------------------------------------------------------------------------
 
-export function Builder({ onGoto, onTry }: { onGoto?: (tab: string) => void; onTry?: (key: string) => void }) {
+export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => void; onTry?: (key: string) => void; agents?: Agent[] }) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [spaces, setSpaces] = useState<{ space_id: string; title: string; description: string }[] | null>(null);
   const [err, setErr] = useState("");
   const [spacesErr, setSpacesErr] = useState("");
-  const [kas, setKas] = useState<{ ka_id: string; display_name: string; description: string; state: string }[] | null>(null);
+  const [kas, setKas] = useState<{ ka_id: string; display_name: string; description: string; state: string; endpoint_name?: string }[] | null>(null);
   const [kasErr, setKasErr] = useState("");
   // What is on screen: the lists, the "what kind?" picker, or one of the wizards.
   const [view, setView] = useState<
@@ -391,169 +391,126 @@ export function Builder({ onGoto, onTry }: { onGoto?: (tab: string) => void; onT
     );
   }
 
-  return (
-    <div>
-      <div className="mb-8 flex flex-wrap items-end justify-between gap-5">
-        <div className="min-w-0 max-w-2xl">
-          <p className="text-[13px] font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--brand-deep)" }}>
-            Manage
-          </p>
-          <h1 className="mt-1 text-[28px] font-semibold leading-tight tracking-[-0.02em]">Build</h1>
-          <p className="mt-1.5 text-[15px] muted">
-            Create an assistant in a few simple steps, or change one you already have. Everything you build
-            shows up in Databricks too.
-          </p>
-        </div>
-        <button type="button" className="btn btn-primary shrink-0" onClick={() => setView({ v: "pick" })}>
-          <PlusIcon size={16} />
-          Create assistant
-        </button>
-      </div>
+  // Is it up, and can it be tried? Read from the assistant list the page already has; nothing is
+  // said about an assistant that is not in it.
+  const byEndpoint = new Map((agents || []).map((a) => [a.name, a]));
+  const live = (endpoint: string): Pick<LibItem, "status" | "tryKey"> => {
+    const a = byEndpoint.get(endpoint);
+    if (!a) return {};
+    return a.ready ? { status: { label: "Ready", tone: "ok" }, tryKey: a.name } : { status: { label: "Starting up", tone: "off" } };
+  };
+  // Only a person is named as owner: a service identity's id means nothing to a reader.
+  const person = (who?: string): [string, string][] => (who && who.includes("@") ? [["Owner", nameOf(who)]] : []);
+  const NO_DESC = "Add a description so people know what it is for.";
 
-      <BuiltSection title="Assistants you have built" sub="Combine tools and information. Supervisor Agents in Databricks.">
-        <ErrorBox>{err}</ErrorBox>
-        {rows === null ? (
-          <Spinner label="Loading…" />
-        ) : rows.length === 0 && !err ? (
-          <Empty title="You have not built any assistants yet" hint="Press “Create assistant” above. It takes a few minutes." />
-        ) : (
-          <CardList
-            items={rows}
-            noun="assistants"
-            keyOf={(r) => r.agent_id}
-            text={(r) => `${r.display_name} ${r.description || ""}`}
-            render={(r) => (
-              <EditCard title={r.display_name} description={r.description} onOpen={() => setView({ v: "assistant", id: r.agent_id })} />
-            )}
-          />
-        )}
-      </BuiltSection>
+  const RELEASE: Record<string, LibItem["status"]> = {
+    live: { label: "Live", tone: "ok" },
+    waiting: { label: "Waiting for approval", tone: "wait" },
+    draft: { label: "Draft", tone: "off" },
+    retired: { label: "Retired", tone: "off" },
+  };
+  const groups: LibGroup[] = [
+    {
+      kind: "custom",
+      items: customs === null ? null : customs.agents.map((c) => {
+        const st = c.latest.status;
+        const sub = c.latest.meta?.submitted;
+        const note =
+          st === "waiting"
+            ? `Waiting for ${(sub?.approvers || []).join(", ") || "an approver"} to approve it.`
+            : st !== "draft"
+              ? undefined
+              : c.ready_to_send
+                ? "Tested and ready. Send it for approval."
+                : !c.latest.meta?.test
+                  ? "Not tested yet. Run its tests, then send it for approval."
+                  : c.next || "Some test answers need a look.";
+        const facts: [string, string][] = [["Version", `v${c.latest.version}`]];
+        if (c.live_version) facts.push(["Live version", `v${c.live_version}`]);
+        facts.push(...person(c.latest.created_by));
+        return {
+          key: c.id,
+          kind: "custom" as const,
+          title: c.name,
+          description: c.description,
+          status: c.live_version && st !== "live" ? { label: "Live", tone: "ok" as const } : RELEASE[st] || { label: c.latest.status_label, tone: "off" as const },
+          facts,
+          note,
+          tryKey: c.live_version ? "ca:" + c.id : undefined,
+          manageLabel: st === "draft" ? "Test and release" : "Manage",
+          onOpen: () => setView({ v: "customPage", id: c.id }),
+        };
+      }),
+      error: customsErr,
+      off: customs && !customs.enabled ? customs.reason : undefined,
+    },
+    {
+      kind: "assistant",
+      items: rows === null ? null : rows.map((r) => ({
+        key: r.agent_id,
+        kind: "assistant" as const,
+        title: r.display_name,
+        description: r.description,
+        ...live(r.endpoint_name),
+        facts: person(r.creator),
+        note: r.description?.trim() ? undefined : NO_DESC,
+        manageLabel: "Change settings",
+        onOpen: () => setView({ v: "assistant", id: r.agent_id }),
+      })),
+      error: err,
+    },
+    {
+      kind: "docs",
+      items: kas === null ? null : kas.map((k) => ({
+        key: k.ka_id,
+        kind: "docs" as const,
+        title: k.display_name,
+        description: k.description,
+        ...live(k.endpoint_name || ""),
+        note: k.description?.trim() ? undefined : NO_DESC,
+        manageLabel: "Change settings",
+        onOpen: () => setView({ v: "docs", id: k.ka_id }),
+      })),
+      error: kasErr,
+    },
+    {
+      kind: "data",
+      items: spaces === null ? null : spaces.map((sp) => {
+        // Genie spaces an app creates for itself ("... (auto-created) <date>") crowd out the ones people made.
+        const auto = /\(auto-created\)/i.test(sp.title || "");
+        return {
+          key: sp.space_id,
+          kind: "data" as const,
+          title: sp.title,
+          description: sp.description,
+          auto,
+          note: auto || sp.description?.trim() ? undefined : NO_DESC,
+          manageLabel: "Change settings",
+          onOpen: () => setView({ v: "genie", id: sp.space_id }),
+        };
+      }),
+      error: spacesErr,
+    },
+    {
+      kind: "code",
+      items: apps === null ? null : apps.agents.map((a) => ({
+        key: a.name,
+        kind: "code" as const,
+        title: a.display_name,
+        description: a.blurb || "",
+        status: a.ready ? { label: "Running", tone: "ok" as const } : { label: "Not running", tone: "warn" as const },
+        facts: [["App", a.app_name || ""]] as [string, string][],
+        note: a.ready ? undefined : "Its app is not running, so nobody can use it. Start it in Databricks.",
+        tryKey: a.ready ? a.name : undefined,
+        manageLabel: "Change settings",
+        onOpen: () => setView({ v: "app", agent: a }),
+      })),
+      error: appsErr,
+      off: apps && !apps.enabled ? apps.reason : undefined,
+    },
+  ];
 
-      <BuiltSection title="Document assistants you can edit" sub="Answer questions from folders of documents. Knowledge Assistants in Databricks.">
-        {kasErr ? <p className="help">Could not list them ({kasErr.slice(0, 140)}).</p> : null}
-        {kas === null ? (
-          <Spinner label="Loading…" />
-        ) : kas.length === 0 && !kasErr ? (
-          <p className="text-sm muted">None yet.</p>
-        ) : (
-          <CardList
-            items={kas}
-            noun="document assistants"
-            keyOf={(k) => k.ka_id}
-            text={(k) => `${k.display_name || ""} ${k.description || ""}`}
-            render={(k) => <EditCard title={k.display_name} description={k.description} onOpen={() => setView({ v: "docs", id: k.ka_id })} />}
-          />
-        )}
-      </BuiltSection>
-
-      <BuiltSection title="Custom agents" sub="Run in the portal. Tested and approved before people use them.">
-        {customsErr ? <p className="help">Could not list them ({customsErr.slice(0, 140)}).</p> : null}
-        {customs === null ? (
-          <Spinner label="Loading…" />
-        ) : !customs.enabled ? (
-          <p className="text-sm muted">{customs.reason}</p>
-        ) : customs.agents.length === 0 ? (
-          <p className="text-sm muted">None yet.</p>
-        ) : (
-          <CardList
-            items={customs.agents}
-            noun="custom agents"
-            keyOf={(c) => c.id}
-            text={(c) => `${c.name} ${c.description}`}
-            render={(c) => (
-              <button
-                type="button"
-                onClick={() => setView({ v: "customPage", id: c.id })}
-                className="card flex w-full flex-col p-5 text-left transition hover:border-[var(--brand)]"
-                title={c.name}
-              >
-                <span className="flex items-start justify-between gap-3">
-                  <h4 className="line-clamp-2 text-base font-semibold leading-snug">{middleShort(c.name)}</h4>
-                  <ReleasePill status={c.latest.status} label={c.latest.status_label} />
-                </span>
-                <p className="mt-1.5 line-clamp-3 text-sm muted">{c.description}</p>
-                <p className="mt-auto pt-4 text-[13px] faint">
-                  Version {c.latest.version}
-                  {c.live_version && c.live_version !== c.latest.version ? ` · version ${c.live_version} is live` : ""}
-                </p>
-              </button>
-            )}
-          />
-        )}
-      </BuiltSection>
-
-      <BuiltSection title="Agents built in code" sub="Agents your developers run as apps in Databricks, offered here.">
-        {appsErr ? <p className="help">Could not list them ({appsErr.slice(0, 140)}).</p> : null}
-        {apps === null ? (
-          <Spinner label="Loading…" />
-        ) : !apps.enabled ? (
-          <p className="text-sm muted">{apps.reason}</p>
-        ) : apps.agents.length === 0 ? (
-          <p className="text-sm muted">None yet.</p>
-        ) : (
-          <CardList
-            items={apps.agents}
-            noun="agents"
-            keyOf={(a) => a.name}
-            text={(a) => `${a.display_name} ${a.blurb || ""} ${a.app_name || ""}`}
-            render={(a) => (
-              <EditCard
-                title={a.display_name}
-                description={(a.ready ? "" : "Not running. ") + (a.blurb || a.app_name || "")}
-                onOpen={() => setView({ v: "app", agent: a })}
-              />
-            )}
-          />
-        )}
-      </BuiltSection>
-
-      <BuiltSection title="Data assistants you can edit" sub="Answer questions from tables. Genie spaces in Databricks.">
-        {spacesErr ? <p className="help">Could not list them ({spacesErr.slice(0, 140)}).</p> : null}
-        {spaces === null ? (
-          <Spinner label="Loading…" />
-        ) : spaces.length === 0 && !spacesErr ? (
-          <p className="text-sm muted">None yet.</p>
-        ) : (
-          <CardList
-            items={spaces}
-            noun="data assistants"
-            keyOf={(sp) => sp.space_id}
-            text={(sp) => `${sp.title || ""} ${sp.description || ""}`}
-            render={(sp) => <EditCard title={sp.title} description={sp.description} onOpen={() => setView({ v: "genie", id: sp.space_id })} />}
-          />
-        )}
-      </BuiltSection>
-    </div>
-  );
-}
-
-function BuiltSection({ title, sub, children }: { title: string; sub: string; children: React.ReactNode }) {
-  return (
-    <section className="mt-10 first-of-type:mt-0">
-      <h2 className="text-[15px] font-semibold tracking-[-0.01em]">{title}</h2>
-      <p className="mb-4 mt-0.5 text-sm muted">{sub}</p>
-      {children}
-    </section>
-  );
-}
-
-/** One editable assistant. Long one-word names are shortened in the middle so
- *  look-alike auto-created names stay distinguishable; the full name is in the tooltip. */
-function EditCard({ title, description, onOpen }: { title: string; description: string; onOpen: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      title={title || "Untitled"}
-      className="card flex w-full flex-col p-5 text-left transition hover:border-[var(--brand)]"
-    >
-      <h4 className="line-clamp-2 text-base font-semibold leading-snug">{middleShort(title) || "Untitled"}</h4>
-      <p className="mt-1.5 line-clamp-3 text-sm muted">{description || "No description yet"}</p>
-      <p className="mt-auto pt-4 text-sm font-medium" style={{ color: "var(--brand-deep)" }}>
-        Change settings →
-      </p>
-    </button>
-  );
+  return <BuildLibrary groups={groups} onCreate={() => setView({ v: "pick" })} onTry={onTry} />;
 }
 
 // ---------------------------------------------------------------------------

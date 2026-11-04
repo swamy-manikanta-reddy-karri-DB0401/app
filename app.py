@@ -35,6 +35,7 @@ import knowledge
 import chats
 import connections
 import custom_agents
+import safety
 import dashboard
 import designer
 import designer_models
@@ -208,7 +209,10 @@ def send(
     else:
         out = chat.ask(_transport(agent), agent["task"], history, tok, files=uploads, output_dir=output_dir,
                        ask_person=_policy(agent, tok))
-    return _answered(out, endpoint, who, tok, payload, history, background, len(uploads))
+    # Safety flags (an override attempt, a key removed, an answer held back) go on the audit record; never the text.
+    flags = out.pop("safety", None)
+    return _answered(out, endpoint, who, tok, payload, history, background, len(uploads),
+                     extra={"safety": flags[:10]} if flags else None)
 
 
 def _transport(agent: dict) -> str:
@@ -648,13 +652,17 @@ def _custom_or_404(agent_id: str) -> dict:
 def _custom_detail(agent_id: str) -> dict:
     out = _custom_or_404(agent_id)
     last = custom_agents.latest(agent_id)
-    out["spec"] = last["spec"]
+    out["spec"] = dict(last["spec"], policy=custom_agents.policy_of(last["spec"]))
     out["meta"] = last["meta"]
     test = last["meta"].get("test") or {}
     out["test"] = custom_agents.test_run(agent_id, test["id"]) if test.get("id") else None
     cur = custom_agents.live(agent_id)
     out["live_spec"] = cur["spec"] if cur and cur["version"] != last["version"] else None
     out["key"] = custom_agents.key(agent_id, last["version"])
+    try:
+        out["usage"] = custom_agents.usage_summary(cur or last)
+    except DbxError:
+        out["usage"] = None  # the page says usage could not be read; nothing else depends on it
     return out
 
 
@@ -687,11 +695,15 @@ def custom_options(x_forwarded_access_token: str = Header(None)):
     try:
         tools = []
         for e in mcps.listing(tok)["mcps"]:
+            running = e["state"] == "running"
             tools.append({"app": e["app_name"], "name": e["name"], "description": e.get("description") or "",
-                          "running": e["state"] == "running", "note": e.get("problem") or e.get("state_note") or ""})
+                          "running": running, "starting": e["state"] == "deploying",
+                          "needs": [] if running else mcps.missing_secrets(e, tok),
+                          "note": e.get("problem") or e.get("state_note") or ""})
         for e in mcps.installed(tok):
             tools.append({"app": e["name"], "name": e["name"], "description": e["description"],
-                          "running": e["state"] == "running", "note": e.get("note") or ""})
+                          "running": e["state"] == "running", "starting": e["state"] == "deploying",
+                          "needs": [], "note": e.get("note") or ""})
         out["tools"] = tools
     except DbxError as exc:
         out["tools"], out["notes"]["tools"] = [], "The tools could not be listed: " + str(exc)[:160]
@@ -702,6 +714,173 @@ def custom_options(x_forwarded_access_token: str = Header(None)):
     out["assistants"] = [{"key": a["name"], "name": a["display_name"], "kind": a.get("kind_label") or ""}
                          for a in access.visible_agents(who, app_token(), tok) if not a.get("preview")]
     return out
+
+
+@app.post("/api/admin/custom-agents/runbook")
+async def custom_runbook(file: UploadFile = File(...), x_forwarded_access_token: str = Header(None)):
+    """Read a runbook file (PDF, Word, PowerPoint, text) into text the builder can check and edit.
+    Nothing is stored here: the text goes back to the page and is saved with the agent's version."""
+    _require_admin(x_forwarded_access_token)
+    name = (file.filename or "runbook").strip()[:120]
+    events.note(action="attached_file", label=name, detail={"type": "Custom agent runbook"})
+    blob = await file.read()
+    if len(blob) > attachments.MAX_PARSE:
+        raise HTTPException(400, "That file is too large for a runbook (25 MB at most).")
+    ext = attachments.kind_of(name)
+    if ext not in ("pdf", "docx", "pptx", "txt", "md", "html", "htm", "json", "yaml", "yml", "xml"):
+        raise HTTPException(400, "A runbook can be a PDF, Word, PowerPoint or text file.")
+    if attachments.looks_like_key_file(blob):
+        raise HTTPException(400, "That file looks like a key or password, so it is not read. Keys are connected separately.")
+    text, _ = custom_agents.text_of(ext, blob)
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(400, "No text could be read from that file (a scanned PDF has none). Paste the text instead.")
+    text, removed = attachments.redact(text[: custom_agents.RUNBOOK_MAX])
+    return {"name": name, "text": text, "chars": len(text), "removed_keys": removed,
+            "searched": len(text) > custom_agents.RUNBOOK_INLINE}
+
+
+@app.post("/api/admin/custom-agents/suggest-tests")
+def custom_suggest_tests(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Test conversations written by the chosen model from the agent as it stands (saved or not)."""
+    _, tok = _require_admin(x_forwarded_access_token)
+    return custom_agents.suggest_tests(payload.get("spec") or {}, tok, payload.get("models"))
+
+
+@app.post("/api/admin/custom-agents/draft")
+def custom_draft(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """A first draft (name, description, instructions, rules, tests) written from the runbook."""
+    _, tok = _require_admin(x_forwarded_access_token)
+    return custom_agents.draft_from_runbook(str(payload.get("text") or ""), tok, payload.get("models"))
+
+
+@app.post("/api/admin/custom-agents/tools/start")
+def custom_tool_start(background: BackgroundTasks, payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Get a tool ready from the custom agent wizard: install or start it, or say which keys it needs first."""
+    who, tok = _require_admin(x_forwarded_access_token)
+    name = str(payload.get("app") or "").strip()
+    if not re.match(r"^[a-z0-9][a-z0-9-]{0,62}$", name):
+        raise HTTPException(400, "That is not a tool.")
+    events.note(action="changed_settings", target=name, label=name, detail={"fields": ["started tool"]})
+    entry = next((e for e in mcps.catalog()[0] if e["app_name"] == name), None)
+    if entry:
+        missing = mcps.missing_secrets(entry, tok)
+        if missing:
+            return {"starting": False, "needs": [{
+                "name": m, "label": m, "kind": "key_file",
+                "what_for": "%s needs this to work. It is kept in the workspace's secret store and never shown to an AI model." % entry["name"],
+                "how_to_get": "Whoever manages that service (for Google, the service account's JSON key) can give it to you.",
+            } for m in missing]}
+        for e in mcps.prepare([entry["slug"]], tok):
+            background.add_task(mcps.install_quietly, e, who, tok)
+        return {"starting": True}
+    # A tool made outside the catalog (for example by the assistant designer): switch its app on.
+    builder.act("POST", "/api/2.0/apps/%s/start" % name, tok, quiet=True)
+    return {"starting": True}
+
+
+def _safety_view(agent_id: str, tok: str) -> dict:
+    rec = custom_agents.latest(agent_id)
+    test = (rec["meta"].get("test") or {})
+    safety_results = []
+    if test.get("id"):
+        try:
+            safety_results = [r for r in custom_agents.test_run(agent_id, test["id"])["results"] if r.get("safety")]
+        except DbxError:
+            safety_results = []
+    cur = custom_agents.live(agent_id) or rec
+    price, note = safety.usd_per_dbu(rec["spec"]["model"])
+    return {"guardrails": custom_agents.guardrails(rec["spec"]["model"], tok),
+            "policy": custom_agents.policy_of(rec["spec"]),
+            "live_policy": custom_agents.policy_of(cur["spec"]) if cur["version"] != rec["version"] else None,
+            "price": {"usd_per_dbu": price, "note": note},
+            "ask_before_changes": rec["spec"].get("ask_before_changes", True),
+            "tests": {"total": len(safety_results), "good": sum(1 for r in safety_results if r["verdict"] == "pass" or r.get("accepted")),
+                      "run": bool(test.get("id")), "full": test.get("full", True)}}
+
+
+@app.get("/api/admin/custom-agents/{agent_id}/safety")
+def custom_safety(agent_id: str, x_forwarded_access_token: str = Header(None)):
+    """Everything that keeps this agent safe, for the safety card: Databricks' guardrails on its model, the
+    portal's own layer, the optional reviewer and the last safety test results."""
+    _, tok = _require_admin(x_forwarded_access_token)
+    _custom_or_404(agent_id)
+    return _safety_view(agent_id, tok)
+
+
+@app.get("/api/approvals/{agent_id}/safety")
+def approval_safety(agent_id: str, x_forwarded_access_token: str = Header(None)):
+    """The same card for the approvers it was sent to (read only)."""
+    who, tok = _who(x_forwarded_access_token)
+    if not any(i["id"] == agent_id for i in custom_agents.waiting_for(who)):
+        raise HTTPException(403, "You were not asked to approve this agent, or it has already been decided.")
+    out = _safety_view(agent_id, tok)
+    out["guardrails"]["can_change"] = False
+    return out
+
+
+@app.post("/api/admin/custom-agents/guardrails")
+def custom_guardrails(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Switch Databricks' AI Gateway safety filter (and personal-data handling) on a model endpoint.
+    As the admin; it affects everyone in the workspace who uses that model, which the page says first."""
+    _, tok = _require_admin(x_forwarded_access_token)
+    model = str(payload.get("model") or "").strip()
+    if not custom_agents.MODEL_RE.match(model):
+        raise HTTPException(400, "That is not a model.")
+    events.note(action="changed_settings", target=model, label=model, detail={"fields": ["model guardrails"]})
+    try:
+        return custom_agents.set_guardrails(model, bool(payload.get("safety", True)), str(payload.get("pii") or "NONE").upper(), tok)
+    except DbxError as exc:
+        raise HTTPException(exc.status if exc.status < 500 else 502,
+                            "Databricks did not allow the change: " + str(exc)[:300])
+
+
+@app.put("/api/admin/custom-agents/{agent_id}/usage-limits")
+def custom_usage_limits(agent_id: str, payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Requests, tokens, cost and questions per person: how much it may be used, so no new test or approval."""
+    _require_admin(x_forwarded_access_token)
+    s = _custom_or_404(agent_id)
+    events.note(action="changed_settings", target=custom_agents.key(agent_id), label=s["name"], detail={"fields": ["usage limits"]})
+    custom_agents.set_usage_limits(agent_id, payload.get("usage") or {})
+    return _custom_detail(agent_id)
+
+
+@app.get("/api/admin/safety-policies")
+def safety_policies(x_forwarded_access_token: str = Header(None)):
+    """The two starting points and the policies admins saved to reuse."""
+    _require_admin(x_forwarded_access_token)
+    try:
+        mine, note = safety.saved(), ""
+    except DbxError as exc:
+        mine, note = [], "Saved policies could not be read: " + str(exc)[:160]
+    return {"presets": [{"id": k, "name": v["name"], "settings": v} for k, v in safety.PRESETS.items()],
+            "saved": mine, "can_save": safety.enabled(), "note": note}
+
+
+@app.post("/api/admin/safety-policies")
+def safety_policy_save(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_admin(x_forwarded_access_token)
+    out = safety.save(payload.get("settings") or {}, who.get("user_name") or "", str(payload.get("id") or ""))
+    events.note(action="changed_settings", target="safety-policy:" + out["id"], label=out["name"], detail={"fields": ["safety policy"]})
+    return out
+
+
+@app.delete("/api/admin/safety-policies/{policy_id}")
+def safety_policy_delete(policy_id: str, x_forwarded_access_token: str = Header(None)):
+    _require_admin(x_forwarded_access_token)
+    safety.remove(policy_id)
+    events.note(action="changed_settings", target="safety-policy:" + policy_id, label="safety policy", detail={"fields": ["deleted"]})
+    return {"ok": True}
+
+
+@app.post("/api/admin/custom-agents/{agent_id}/restore")
+def custom_restore(agent_id: str, payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_admin(x_forwarded_access_token)
+    s = _custom_or_404(agent_id)
+    version = int(payload.get("version") or 0)
+    events.note(action="restored_version", target=custom_agents.key(agent_id), label=s["name"], detail={"version": version})
+    custom_agents.restore(agent_id, version, who)
+    return _custom_detail(agent_id)
 
 
 @app.get("/api/admin/custom-agents/{agent_id}")
@@ -752,8 +931,19 @@ def custom_audience(agent_id: str, payload: dict = Body(...), x_forwarded_access
     return _custom_detail(agent_id)
 
 
+@app.get("/api/admin/custom-agents/{agent_id}/tests/estimate")
+def custom_test_estimate(agent_id: str, x_forwarded_access_token: str = Header(None)):
+    """Roughly what a quick and a full test run will cost, shown before either is started."""
+    _require_admin(x_forwarded_access_token)
+    _custom_or_404(agent_id)
+    rec = custom_agents.latest(agent_id)
+    _, tok = _require_admin(x_forwarded_access_token)
+    return {"quick": custom_agents.estimate(rec, False), "full": custom_agents.estimate(rec, True),
+            "judge": custom_agents.suggested_judge(rec["spec"]["model"], tok)}
+
+
 @app.post("/api/admin/custom-agents/{agent_id}/tests")
-def custom_test(agent_id: str, x_forwarded_access_token: str = Header(None)):
+def custom_test(agent_id: str, payload: dict = Body(default={}), x_forwarded_access_token: str = Header(None)):
     who, tok = _require_admin(x_forwarded_access_token)
     _custom_or_404(agent_id)
     rec = custom_agents.latest(agent_id)
@@ -763,7 +953,14 @@ def custom_test(agent_id: str, x_forwarded_access_token: str = Header(None)):
         raise HTTPException(409, "The documents are still being read. Try again when that is done.")
     if len(rec["spec"]["tests"]) < custom_agents.MIN_TESTS:
         raise HTTPException(400, "Add at least %d test questions first." % custom_agents.MIN_TESTS)
-    return {"job": custom_agents.start_tests(rec, tok, who)}
+    judge = str((payload or {}).get("judge") or "").strip()
+    if judge:
+        # The builder chose who checks the answers; it must be a model they may use (Databricks decides).
+        if not custom_agents.MODEL_RE.match(judge) or judge not in {m["name"] for m in designer_models.catalog(tok)}:
+            raise HTTPException(400, "That checker model is not one you can use. Choose another.")
+        if judge == rec["spec"]["model"]:
+            raise HTTPException(400, "Choose a different model to check the answers than the one the agent uses.")
+    return {"job": custom_agents.start_tests(rec, tok, who, full=(payload or {}).get("full", True) is not False, judge=judge)}
 
 
 @app.get("/api/admin/custom-agents/jobs/{job_id}")

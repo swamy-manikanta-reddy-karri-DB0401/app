@@ -1,10 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { CustomSpec, CustomSummary, CustomTestResult, CustomTestRun } from "@/lib/api";
+import { api } from "@/lib/api";
+import type { CustomSpec, CustomSummary, CustomTestResult, CustomTestRun, SafetyView } from "@/lib/api";
 import { CheckIcon, CloseIcon } from "../icons";
+import { DEFAULT_POLICY, needsChecker, policyLines } from "./Policy";
 
 /** Pieces shared by the builder's agent page and the approver's page, so both describe a
  *  custom agent, its release and its tests in the same words. */
@@ -133,6 +135,12 @@ function ResultRow({ r, onAccept }: { r: CustomTestResult; onAccept?: (note: str
         </span>
         <span className="min-w-0 flex-1">
           <span className="block text-[14px] font-medium">{r.question}</span>
+          {(r.then || []).map((f, k) => (
+            <span key={k} className="block text-[13px]">
+              <span className="faint">then: </span>
+              {f}
+            </span>
+          ))}
           <span className="block text-[12.5px] muted">
             {r.rule ? `Checks the rule: ${r.rule}` : r.expect ? `Expected: ${r.expect}` : ""}
           </span>
@@ -205,14 +213,20 @@ function ResultRow({ r, onAccept }: { r: CustomTestResult; onAccept?: (note: str
 
 /** What the agent can use, in words. */
 export function Abilities({ spec }: { spec: CustomSpec }) {
+  const lim = spec.limits;
+  const pol = policyLines(spec.policy || DEFAULT_POLICY);
   const rows: [string, string][] = [
     ["AI model", spec.model],
+    ["Runbook", spec.runbook ? `${spec.runbook.name} (${spec.runbook.text.length.toLocaleString()} characters${spec.runbook.sha ? ", fingerprint " + spec.runbook.sha.slice(0, 8) : ""})` : "None"],
     ["Documents", spec.documents.length ? spec.documents.join(", ") : "None"],
     ["Tools", spec.tools.length ? spec.tools.map((t) => t.name).join(", ") : "None"],
     ["Data", spec.data.length ? spec.data.map((d) => d.title).join(", ") : "None"],
     ["Other assistants", spec.assistants.length ? spec.assistants.map((a) => a.name).join(", ") : "None"],
     ["Before a tool changes something", spec.ask_before_changes ? "It asks the person" : "It goes ahead"],
     ["Who will use it", spec.audience.length ? spec.audience.map((a) => a.principal).join(", ") : "Nobody chosen yet"],
+    ["Each answer", lim ? `Up to ${lim.steps} steps, replies up to ${lim.reply_tokens.toLocaleString()} tokens` : "Default"],
+    ["Safety policy", (spec.policy || DEFAULT_POLICY).name],
+    ...pol.map(([k, v]) => [k === "Usage limits" ? k : "Safety: " + k.toLowerCase(), v] as [string, string]),
   ];
   return (
     <dl className="grid gap-x-6 gap-y-2 text-[14px] sm:grid-cols-[200px_minmax(0,1fr)]">
@@ -239,5 +253,177 @@ export function Rules({ spec }: { spec: CustomSpec }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** The runbook, readable in full: approvers see exactly the procedure they approve. */
+export function RunbookView({ spec }: { spec: CustomSpec }) {
+  if (!spec.runbook) return <p className="text-[14px] muted">No runbook: it follows its instructions.</p>;
+  return (
+    <div>
+      <p className="text-[14px]">
+        <b>{spec.runbook.name}</b>{" "}
+        <span className="muted">
+          · {spec.runbook.text.length.toLocaleString()} characters{spec.runbook.sha ? ` · fingerprint ${spec.runbook.sha.slice(0, 8)}` : ""}
+        </span>
+      </p>
+      <details className="mt-2">
+        <summary className="cursor-pointer text-[13px] font-medium muted">Read the runbook</summary>
+        <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg p-3 text-[12.5px]" style={{ background: "var(--canvas)" }}>
+          {spec.runbook.text}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
+/** Everything that keeps this agent safe, in one card, the same for builders and approvers. */
+export function SafetyCard({ id, approver = false }: { id: string; approver?: boolean }) {
+  const [v, setV] = useState<SafetyView | null>(null);
+  const [err, setErr] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [pii, setPii] = useState("MASK");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api.customSafety(id, approver).then(setV).catch((e) => setErr(e.message));
+  }, [id, approver]);
+
+  const [offAsk, setOffAsk] = useState(false);
+  async function change(onNow: boolean) {
+    if (!v?.guardrails.endpoint) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const g = await api.customGuardrails(v.guardrails.endpoint, onNow, onNow ? pii : "NONE");
+      setV({ ...v, guardrails: g });
+      setAsking(false);
+      setOffAsk(false);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const g = v?.guardrails;
+  const on = !!(g?.input?.safety && g?.output?.safety);
+  const word = (x?: string) => (x === "MASK" ? "masked" : x === "BLOCK" ? "blocked" : "not filtered");
+  const rows: [string, React.ReactNode, boolean][] = v
+    ? [
+        [
+          "Databricks safety filter",
+          g?.known ? (
+            <>
+              {on ? "On for questions and answers" : "Off"} on {g.endpoint} · personal data {word(g.output?.pii)}
+              {on ? "" : ". Optional: the portal's safety policy below does the checking, and Databricks' filter is not available in every region"}
+            </>
+          ) : (
+            g?.note || "Could not be read"
+          ),
+          true,
+        ],
+        ["Safety policy", `${v.policy.name}: checked by the portal on every message and answer`, true],
+        ...policyLines(v.policy).map(([k, text]) => {
+          const good =
+            k === "Messages"
+              ? v.policy.input.attacks !== "off"
+              : k === "Checked by"
+                ? !!v.policy.checker || !needsChecker(v.policy)
+                : k === "Usage limits"
+                  ? !!(v.policy.usage.requests || v.policy.usage.tokens || v.policy.usage.cost_usd || v.policy.usage.per_person_daily)
+                  : true;
+          return [k, text, good] as [string, React.ReactNode, boolean];
+        }),
+        ...(v.live_policy && JSON.stringify(v.live_policy) !== JSON.stringify(v.policy)
+          ? [["Live version", `People using it now get the live version's policy (${v.live_policy.name}) until this one is approved`, true] as [string, React.ReactNode, boolean]]
+          : []),
+        ["Documents and tools", "What they return is treated as data it never takes orders from", true],
+        ["Changes", v.ask_before_changes ? "A tool that changes something waits for the person" : "Tools may change things without asking", v.ask_before_changes],
+        ["Data access", "Each person's own Databricks permissions; it cannot see what they cannot", true],
+        [
+          "Safety tests",
+          !v.tests.run
+            ? "Not run yet: run a full test"
+            : !v.tests.full
+              ? "Last run was a quick test: run a full test"
+              : !v.tests.total
+                ? "The last full test was before the safety checks existed: run a full test"
+                : `${v.tests.good} of ${v.tests.total} passed`,
+          v.tests.run && v.tests.full && v.tests.total > 0 && v.tests.good === v.tests.total,
+        ],
+      ]
+    : [];
+  return (
+    <div className="card mt-4 p-5">
+      <h3 className="text-[15px] font-semibold">Safety</h3>
+      {err ? <p className="mt-2 text-[13px]" style={{ color: "var(--err)" }}>{err}</p> : null}
+      {!v && !err ? <p className="mt-2 text-[14px] muted">Checking…</p> : null}
+      <ul className="mt-2 divide-y" style={{ borderColor: "var(--line)" }}>
+        {rows.map(([k, text, good]) => (
+          <li key={k} className="flex items-start gap-3 py-2.5 text-[14px]">
+            <span
+              aria-hidden
+              className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full"
+              style={good ? { background: "color-mix(in srgb, var(--ok) 16%, transparent)", color: "var(--ok)" } : { background: "var(--warn-bg)", color: "var(--ink)" }}
+            >
+              {good ? <CheckIcon size={12} /> : "!"}
+            </span>
+            <span className="w-44 shrink-0 font-medium">{k}</span>
+            <span className="min-w-0 flex-1 muted">{text}</span>
+          </li>
+        ))}
+      </ul>
+      {g?.known && !on && g.can_change ? (
+        asking ? (
+          <div className="mt-3 rounded-xl p-4" style={{ background: "var(--warn-bg)" }}>
+            <p className="text-[14px]">
+              This switches on Databricks&apos; safety filter for <b>{g.endpoint}</b>. It applies to <b>everyone in this workspace who uses that model</b>,
+              not only this agent.
+            </p>
+            <label className="mt-3 block max-w-xs">
+              <span className="text-[13px] font-medium muted">Personal data (names, emails, phone numbers) in questions and answers</span>
+              <span className="mt-1 flex gap-2">
+                {[["NONE", "Leave it"], ["MASK", "Mask it"], ["BLOCK", "Block it"]].map(([val, label]) => (
+                  <button key={val} type="button" className="filter-chip" aria-pressed={pii === val} onClick={() => setPii(val)}>
+                    {label}
+                  </button>
+                ))}
+              </span>
+            </label>
+            <div className="mt-3 flex gap-2">
+              <button type="button" className="btn btn-primary" disabled={busy} onClick={() => change(true)}>
+                {busy ? "Turning on and checking the model still answers…" : "Turn on"}
+              </button>
+              <button type="button" className="btn btn-quiet" onClick={() => setAsking(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" className="btn btn-quiet mt-3" onClick={() => setAsking(true)}>
+            Turn on Databricks safety filter
+          </button>
+        )
+      ) : null}
+      {g?.known && (on || (g.output?.pii && g.output.pii !== "NONE")) && g.can_change ? (
+        offAsk ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl p-3" style={{ background: "var(--warn-bg)" }}>
+            <span className="text-[14px]">
+              Turn off Databricks&apos; safety and personal-data filters on <b>{g.endpoint}</b> for everyone who uses it? The portal&apos;s own protection stays on.
+            </span>
+            <button type="button" className="btn btn-quiet" disabled={busy} onClick={() => change(false)}>
+              {busy ? "Turning off…" : "Yes, turn off"}
+            </button>
+            <button type="button" className="btn btn-quiet" onClick={() => setOffAsk(false)}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button type="button" className="btn btn-quiet mt-3" onClick={() => setOffAsk(true)}>
+            Turn off Databricks safety filter
+          </button>
+        )
+      ) : null}
+    </div>
   );
 }

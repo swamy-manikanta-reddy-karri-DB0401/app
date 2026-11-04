@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApprovalWaiting, CustomDetail } from "@/lib/api";
 import { Empty, ErrorBox, Spinner } from "../bits";
-import { Abilities, ReleasePill, Rules, TestResults } from "./parts";
+import { Abilities, ReleasePill, Rules, RunbookView, SafetyCard, TestResults } from "./parts";
 
 /** Agents waiting for this person's approval. Anyone can be asked, not only admins: they read what
  *  the agent does and its test answers, try the exact version, then approve or send it back. */
@@ -127,6 +127,10 @@ function Decide({ id, onBack, onTry, onDecided }: { id: string; onBack: () => vo
           <summary className="cursor-pointer text-[13px] font-medium muted">Its instructions</summary>
           <p className="mt-2 whitespace-pre-wrap text-[14px]">{d.spec.instructions}</p>
         </details>
+        <h4 className="mt-4 text-[13px] font-semibold uppercase tracking-wide faint">Runbook it follows</h4>
+        <div className="mt-1">
+          <RunbookView spec={d.spec} />
+        </div>
         <h4 className="mt-4 text-[13px] font-semibold uppercase tracking-wide faint">Rules it must follow</h4>
         <div className="mt-1">
           <Rules spec={d.spec} />
@@ -136,6 +140,8 @@ function Decide({ id, onBack, onTry, onDecided }: { id: string; onBack: () => vo
           <Abilities spec={d.spec} />
         </div>
       </div>
+
+      <SafetyCard id={id} approver />
 
       <div className="card mt-4 p-5">
         <h3 className="text-[15px] font-semibold">Test answers</h3>

@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import app_agents
 import custom_agents
@@ -341,20 +342,48 @@ def visible_agents(who: dict, app_tok: str, user_tok: str = "") -> list:
     entry is better than hiding something they can legitimately open.
     """
     listing_tok = user_tok or app_tok
-    out = []
-    for agent in all_agents(listing_tok, user_tok):
-        # Databricks already decided this caller may see the agent. Do not
+    # The three sources are independent, so they are read side by side. Measured live (2026-11-02):
+    # one after another, with each guest list read in turn, this took 15 s for 21 assistants.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        apps = pool.submit(app_agents.visible, who)
+        customs = pool.submit(custom_agents.visible, who)
+        agents = all_agents(listing_tok, user_tok)
+        # Databricks already decided this caller may see each agent. Do not
         # second-guess it: re-deriving the answer from the guest list only
         # invents ways to hide something the user is entitled to (it silently
         # dropped service-principal callers, for one). The guest list is read
         # solely to explain *why*, and any failure to explain is cosmetic.
-        reason = ""
+        reasons = list(_reader().map(lambda a: _reason(a, who, app_tok), agents))
+        out = [dict(a, access_reason=r or "granted in Databricks") for a, r in zip(agents, reasons)]
+        return out + apps.result() + customs.result()
+
+
+_why: dict = {}     # endpoint id -> (time, guest list), only to explain access; never used to decide it
+_pool: ThreadPoolExecutor | None = None
+WHY_TTL = 60
+
+
+def _reader() -> ThreadPoolExecutor:
+    global _pool
+    if _pool is None:
+        _pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="acl-read")
+    return _pool
+
+
+def _reason(agent: dict, who: dict, app_tok: str) -> str:
+    """Why this person may use the agent ("via group finance"), from a guest list read at most once
+    a minute. Grants and revokes always read the list fresh (acl); this is presentation only."""
+    key = agent.get("id") or agent.get("name")
+    hit = _why.get(key)
+    if hit and time.time() - hit[0] < WHY_TTL:
+        entries = hit[1]
+    else:
         try:
-            reason = _can_query(acl(agent, app_tok), who) or ""
+            entries = acl(agent, app_tok)
         except DbxError:
-            pass
-        out.append(dict(agent, access_reason=reason or "granted in Databricks"))
-    return out + app_agents.visible(who) + custom_agents.visible(who)
+            entries = []
+        _why[key] = (time.time(), entries)
+    return _can_query(entries, who) or ""
 
 
 def admin_agents(app_tok: str, user_tok: str = "", who: dict | None = None) -> list:

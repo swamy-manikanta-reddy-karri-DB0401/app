@@ -208,11 +208,17 @@ def call(method: str, path: str, token: str, **kw) -> Any:
     # For best-effort calls whose failure is expected (and handled by the
     # caller): logged quietly so they do not fill the problem log.
     quiet = kw.pop("quiet", False)
-    resp = http().request(method, f"{host()}{path}", headers=headers, timeout=120, **kw)
-    fresh = _stale_cli_token(token, resp)
-    if fresh:
-        headers["Authorization"] = f"Bearer {fresh}"
+    try:
         resp = http().request(method, f"{host()}{path}", headers=headers, timeout=120, **kw)
+        fresh = _stale_cli_token(token, resp)
+        if fresh:
+            headers["Authorization"] = f"Bearer {fresh}"
+            resp = http().request(method, f"{host()}{path}", headers=headers, timeout=120, **kw)
+    except httpx.RequestError as exc:
+        # Seen (2026-11-04): the network dropped mid-run and the page got a bare 500. A connection
+        # failure is said in words and mapped to 503, like every other Databricks refusal.
+        log.log(logging.DEBUG if quiet else logging.WARNING, "%s %s -> could not connect: %s", method, path, type(exc).__name__)
+        raise DbxError("Could not reach Databricks just now (%s). Check the connection and try again." % type(exc).__name__, 503)
     if resp.status_code >= 400:
         # Logged here as well as in the route handler, because callers often
         # swallow this error (name lookups, "why" labels) and it would vanish.

@@ -623,9 +623,13 @@ h1, h2, h3, h4,
   .kind-supervisor { background: color-mix(in srgb, #058ea8 14%, transparent); color: #058ea8; }
   .kind-knowledge { background: color-mix(in srgb, #7c5cd6 14%, transparent); color: #6a4cc4; }
   .kind-agent { background: color-mix(in srgb, #d9822b 16%, transparent); color: #b0601a; }
+  .kind-data { background: color-mix(in srgb, #2f6fd6 14%, transparent); color: #2a5fb8; }
+  .kind-code { background: color-mix(in srgb, #5b6675 16%, transparent); color: #4a5361; }
   :root[data-theme="dark"] .kind-supervisor { color: #2ecfc7; }
   :root[data-theme="dark"] .kind-knowledge { color: #a993ee; }
   :root[data-theme="dark"] .kind-agent { color: #f0a659; }
+  :root[data-theme="dark"] .kind-data { color: #7fa8f0; }
+  :root[data-theme="dark"] .kind-code { color: #b3bcc8; }
   .cap {
     @apply inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium;
     background: var(--canvas);
@@ -751,6 +755,8 @@ h1, h2, h3, h4,
   :root:not([data-theme="light"]) .kind-supervisor { color: #2ecfc7; }
   :root:not([data-theme="light"]) .kind-knowledge { color: #a993ee; }
   :root:not([data-theme="light"]) .kind-agent { color: #f0a659; }
+  :root:not([data-theme="light"]) .kind-data { color: #7fa8f0; }
+  :root:not([data-theme="light"]) .kind-code { color: #b3bcc8; }
 }
 @media (prefers-reduced-motion: reduce) {
   .agent-card, .agent-card .go { transition: none; }

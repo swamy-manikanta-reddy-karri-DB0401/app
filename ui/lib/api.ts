@@ -498,13 +498,69 @@ export type CustomSpec = {
   tools: { app: string; name: string }[];
   data: { space_id: string; title: string }[];
   assistants: { key: string; name: string }[];
-  tests: { question: string; expect: string }[];
+  /** A test is one chat: its first message, any follow-ups the person sends, and what a good last answer does. */
+  tests: { question: string; expect: string; then?: string[] }[];
   audience: { kind: "group" | "user"; principal: string }[];
   ask_before_changes: boolean;
+  /** The approved procedure it follows; saved with the version (sha = which text was approved). */
+  runbook: { name: string; text: string; sha?: string } | null;
+  /** Per answer: most steps and longest reply (part of what is tested). */
+  limits: { steps: number; reply_tokens: number };
+  /** What is checked on the way in and out, the admin's own rules, and how much it may be used. */
+  policy: SafetyPolicy;
+};
+
+export type PolicyRule = { text: string; kind: "phrase" | "rule"; where: "input" | "output" | "both"; action: "block" | "remove" };
+
+export type UsageLimits = { requests: number; tokens: number; cost_usd: number; days: number; per_person_daily: number };
+
+/** A safety policy (safety.py): everything but `usage` is part of what is tested. */
+export type SafetyPolicy = {
+  name: string;
+  input: { attacks: "block" | "warn" | "off"; personal_data: "block" | "mask" | "off"; secrets: "block" | "mask"; unsafe: "block" | "off"; max_chars: number };
+  output: { personal_data: "remove" | "block" | "off"; unsafe: "block" | "off" };
+  rules: PolicyRule[];
+  /** The model that judges unsafe content and plain-English rules ("" = none). */
+  checker: string;
+  /** When the checker cannot answer: let it through and record it, or hold it back. */
+  on_error: "allow" | "block";
+  usage: UsageLimits;
+};
+
+export type SavedPolicy = { id: string; name: string; settings: SafetyPolicy; by?: string; at?: string };
+
+export type SafetyView = {
+  guardrails: {
+    known: boolean;
+    note?: string;
+    endpoint?: string;
+    input?: { safety: boolean; pii: string };
+    output?: { safety: boolean; pii: string };
+    can_change?: boolean;
+  };
+  policy: SafetyPolicy;
+  live_policy: SafetyPolicy | null;
+  price: { usd_per_dbu: number | null; note: string };
+  ask_before_changes: boolean;
+  tests: { total: number; good: number; run: boolean; full: boolean };
+};
+
+export type CustomUsage = {
+  days: number;
+  questions: number;
+  tokens_in: number;
+  tokens_out: number;
+  dbus: number;
+  /** DBUs times Databricks' list price for the model's SKU; null when that price cannot be read. */
+  usd: number | null;
+  price_note: string;
+  people: number;
+  questions_today: number;
 };
 
 export type CustomTestResult = {
   question: string;
+  then?: string[];
   expect: string;
   rule: string;
   answer: string;
@@ -546,7 +602,7 @@ export type CustomMeta = {
     problems?: string[];
     outline?: { file: string; about: string }[];
   };
-  test?: { id: string; passed: boolean; total: number; good: number; by: string; at: string };
+  test?: { id: string; passed: boolean; total: number; good: number; by: string; at: string; notes?: string[]; full?: boolean; judge?: string };
   submitted?: { by: string; at: string; approvers: string[]; note: string };
   decision?: { by: string; at: string; approved: boolean; note: string };
   live_since?: string;
@@ -560,15 +616,18 @@ export type CustomDetail = CustomSummary & {
   key: string;
   warnings?: string[];
   what?: string;
+  usage?: CustomUsage | null;
 };
 
 export type CustomOptions = {
   models: { name: string; label: string; detail: string; recommended: boolean; tools: boolean | null; fit: string }[];
-  tools: { app: string; name: string; description: string; running: boolean; note: string }[];
+  tools: { app: string; name: string; description: string; running: boolean; starting: boolean; needs: string[]; note: string }[];
   data: { space_id: string; title: string; description: string }[];
   assistants: { key: string; name: string; kind: string }[];
   notes: Record<string, string>;
 };
+
+export type TestEstimate = { conversations: number; dbus: number; basis: string };
 
 export type TestJob = { state: "running" | "done" | "failed"; done: number; total: number; step: string; seconds: number; error?: string };
 
@@ -604,7 +663,9 @@ export const api = {
   customSave: (id: string, spec: CustomSpec) => send<CustomDetail>("PUT", `/api/admin/custom-agents/${id}`, spec),
   customAudience: (id: string, audience: CustomSpec["audience"]) =>
     send<CustomDetail>("PUT", `/api/admin/custom-agents/${id}/audience`, { audience }),
-  customTest: (id: string) => request<{ job: string }>(`/api/admin/custom-agents/${id}/tests`, {}),
+  customTest: (id: string, full = true, judge = "") => request<{ job: string }>(`/api/admin/custom-agents/${id}/tests`, { full, judge }),
+  customEstimate: (id: string) =>
+    request<{ quick: TestEstimate; full: TestEstimate; judge: string }>(`/api/admin/custom-agents/${id}/tests/estimate`),
   customJob: (job: string) => request<TestJob>(`/api/admin/custom-agents/jobs/${job}`),
   customAccept: (id: string, test: string, index: number, note: string) =>
     request<CustomTestRun>(`/api/admin/custom-agents/${id}/tests/${test}/accept`, { index, note }),
@@ -612,6 +673,28 @@ export const api = {
     request<CustomDetail>(`/api/admin/custom-agents/${id}/submit`, { approvers, note }),
   customRetire: (id: string) => request<CustomDetail>(`/api/admin/custom-agents/${id}/retire`, {}),
   customDelete: (id: string) => send<{ deleted: string }>("DELETE", `/api/admin/custom-agents/${id}`),
+  customDraft: (text: string, model?: string) =>
+    request<{ name: string; description: string; instructions: string; rules: string[]; tests: { question: string; expect: string; then?: string[] }[]; notes: string[] }>(
+      "/api/admin/custom-agents/draft",
+      { text, ...(model ? { models: { chat: model } } : {}) }
+    ),
+  customSuggestTests: (spec: CustomSpec, model?: string) =>
+    request<{ tests: { question: string; expect: string; then?: string[] }[]; notes: string[] }>("/api/admin/custom-agents/suggest-tests", {
+      spec,
+      ...(model ? { models: { chat: model } } : {}),
+    }),
+  customSafety: (id: string, approver = false) =>
+    request<SafetyView>(approver ? `/api/approvals/${id}/safety` : `/api/admin/custom-agents/${id}/safety`),
+  customGuardrails: (model: string, safety: boolean, pii: string) =>
+    request<SafetyView["guardrails"]>("/api/admin/custom-agents/guardrails", { model, safety, pii }),
+  customUsageLimits: (id: string, usage: UsageLimits) => send<CustomDetail>("PUT", `/api/admin/custom-agents/${id}/usage-limits`, { usage }),
+  safetyPolicies: () =>
+    request<{ presets: SavedPolicy[]; saved: SavedPolicy[]; can_save: boolean; note: string }>("/api/admin/safety-policies"),
+  saveSafetyPolicy: (settings: SafetyPolicy, id = "") => request<SavedPolicy>("/api/admin/safety-policies", { settings, id }),
+  deleteSafetyPolicy: (id: string) => send<{ ok: boolean }>("DELETE", `/api/admin/safety-policies/${id}`),
+  customRestore: (id: string, version: number) => request<CustomDetail>(`/api/admin/custom-agents/${id}/restore`, { version }),
+  customToolStart: (app: string) =>
+    request<{ starting: boolean; needs?: DesignerConnection[] }>("/api/admin/custom-agents/tools/start", { app }),
   approvals: () => request<{ items: ApprovalWaiting[] }>("/api/approvals"),
   approvalGet: (id: string) => request<CustomDetail>(`/api/approvals/${id}`),
   approvalDecide: (id: string, approve: boolean, note: string) => request<unknown>(`/api/approvals/${id}`, { approve, note }),
@@ -896,4 +979,14 @@ export async function upload(endpoint: string, file: File) {
 // download UI, rather than the app re-implementing a save-file flow.
 export function downloadUrl(endpoint: string, path: string, sig?: string) {
   return "/api/download?" + new URLSearchParams({ endpoint, path, ...(sig ? { sig } : {}) }).toString();
+}
+
+/** Read a runbook file into text (nothing is stored until the agent is saved). */
+export async function customRunbook(file: File): Promise<{ name: string; text: string; chars: number; removed_keys: boolean; searched: boolean }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch("/api/admin/custom-agents/runbook", { method: "POST", body: fd });
+  const data: any = await parsed(res);
+  if (!res.ok) throw new Error(data.error || data.detail || `Could not read it (${res.status})`);
+  return data;
 }

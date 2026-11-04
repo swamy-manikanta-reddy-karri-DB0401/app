@@ -502,7 +502,7 @@ export default function Page() {
                       <Admin />
                     </Tabs.Content>
                     <Tabs.Content value="build" className="outline-none">
-                      <Builder onGoto={pickTab} onTry={openKey} />
+                      <Builder onGoto={pickTab} onTry={openKey} agents={agents || []} />
                     </Tabs.Content>
                     <Tabs.Content value="monitoring" className="outline-none">
                       <PageHead

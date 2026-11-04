@@ -23,7 +23,7 @@ from common import TABLE_RE, Api, DeployError
 import workspace as ws
 
 HISTORY_TABLES = ("portal_logs", "portal_chats", "portal_events", "portal_app_agents", "portal_custom_agents",
-                  "portal_custom_agent_tests", "portal_custom_agent_docs")
+                  "portal_custom_agent_tests", "portal_custom_agent_docs", "portal_custom_agent_usage", "portal_safety_policies")
 
 
 def _gone(exc: DeployError) -> bool:

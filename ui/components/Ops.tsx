@@ -356,6 +356,8 @@ function sentence(e: PortalEvent): ReactNode {
       return <>{name} approved {b(label)}; it is now live</>;
     case "sent_back":
       return <>{name} sent {b(label)} back for changes</>;
+    case "restored_version":
+      return <>{name} put version {d.version ?? "?"} of {b(label)} back live</>;
     case "retired_assistant":
       return <>{name} retired {b(label)}</>;
     case "saved_connection":

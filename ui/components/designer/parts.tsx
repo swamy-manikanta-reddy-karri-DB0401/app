@@ -127,7 +127,10 @@ export const TOOL_KIND: Record<string, string> = {
 /** What a proposed tool can reach, in plain words, from the checks made on its code. */
 export function reach(n: DesignerNewTool): string[] {
   const r = n.report;
-  if (n.kind === "uc_function") return ["Does a calculation or query, as the person using it", "Cannot change anything"];
+  if (n.kind === "uc_function")
+    return n.report?.language === "python"
+      ? ["Does a calculation on what it is given (Python)", "No internet and no files: Databricks runs it shut off", "Cannot change anything"]
+      : ["Does a calculation or query, as the person using it", "Cannot change anything"];
   const out: string[] = [];
   if (r.reads_files) out.push("Reads files");
   if (r.saves_files) out.push("Saves files");

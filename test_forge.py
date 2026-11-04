@@ -74,6 +74,30 @@ def says(item, fragment):
     assert any(fragment in p for p in item["problems"]), (fragment, item["problems"])
 
 
+@case("a Python function: a calculation passes; files, websites, system calls and dynamic code are refused")
+def _():
+    good = forge.clean_item({"kind": "uc_function", "name": "c.s.margin", "description": "Margin of a media line.",
+                             "sql": "CREATE FUNCTION c.s.margin(net DOUBLE, cost DOUBLE)\nRETURNS STRING\nLANGUAGE PYTHON\n"
+                                    "COMMENT 'Margin'\nAS $$\nimport json\nif not net:\n    return json.dumps({'ok': False})\n"
+                                    "return json.dumps({'ok': True, 'margin': round((net - (cost or 0)) / net, 4)})\n$$",
+                             "example": "SELECT c.s.margin(80000, 5000)"})
+    assert good["problems"] == [] and good["report"]["language"] == "python" and good["report"]["calls_internet"] is False
+    head = "CREATE FUNCTION c.s.f(x INT) RETURNS STRING LANGUAGE PYTHON AS $$\n%s\n$$"
+    for body, why in [("import os\nreturn os.getcwd()", "not os"), ("import urllib.request\nreturn 'x'", "not urllib"),
+                      ("import subprocess\nreturn 'x'", "not subprocess"), ("return open('/etc/passwd').read()", "open()"),
+                      ("return eval('1')", "eval()"), ("return ().__class__.__bases__", "__"), ("x = 1", "must return"),
+                      ("global y\nreturn 1", "global"), ("return (", "does not parse")]:
+        it = forge.clean_item({"kind": "uc_function", "name": "c.s.f", "description": "d", "sql": head % body})
+        assert any(why in p for p in it["problems"]), (body, it["problems"])
+    for sql, why in [("CREATE OR REPLACE FUNCTION c.s.f(x INT) RETURNS STRING LANGUAGE PYTHON AS $$\nreturn 'x'\n$$", "OR REPLACE"),
+                     ("CREATE FUNCTION c.s.f(x INT) RETURNS STRING LANGUAGE PYTHON LOCATION 's3://x' AS $$\nreturn 'x'\n$$", "must be"),
+                     ("CREATE FUNCTION c.s.other(x INT) RETURNS STRING LANGUAGE PYTHON AS $$\nreturn 'x'\n$$", "same as")]:
+        it = forge.clean_item({"kind": "uc_function", "name": "c.s.f", "description": "d", "sql": sql})
+        assert any(why in p for p in it["problems"]), (sql, it["problems"])
+    # SQL functions are unchanged, and SQL may still not switch language part-way
+    assert forge.clean_item({"kind": "uc_function", "name": "c.s.g", "description": "d", "sql": "CREATE FUNCTION c.s.g(x INT) RETURNS INT RETURN x + 1"})["problems"] == []
+
+
 @case("a tool that reads and saves spreadsheets passes, and says what it can reach")
 def _():
     t = tool()
@@ -185,7 +209,9 @@ def _():
     says(fn(good.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION")), "not OR REPLACE")
     says(fn(good + "; DROP TABLE main.a.b"), "single statement")
     says(fn("CREATE FUNCTION main.tools.fx() RETURNS INT RETURN (SELECT 1) -- hi"), "no comments")
-    says(fn("CREATE FUNCTION main.tools.fx() RETURNS INT LANGUAGE PYTHON AS $$ return 1 $$"), "LANGUAGE PYTHON")
+    # Python functions are allowed now (checked on their own); Scala, or Python smuggled in another shape, is not
+    says(fn("CREATE FUNCTION main.tools.fx() RETURNS INT LANGUAGE SCALA AS $$ 1 $$"), "LANGUAGE SCALA")
+    says(fn("CREATE FUNCTION main.tools.fx() RETURNS INT LANGUAGE PYTHON RETURN 1"), "must be: CREATE FUNCTION")
     says(fn("CREATE FUNCTION main.tools.fx() RETURNS INT RETURN (DELETE FROM main.a.b)"), "DELETE")
     says(fn(good.replace("main.tools.fx", "main.tools.other")), "same as the function's name")
     says(fn("CREATE FUNCTION main.tools.fx() RETURNS INT"), "RETURN")

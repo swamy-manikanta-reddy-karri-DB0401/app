@@ -49,6 +49,7 @@ import hashlib
 import json
 import logging
 import re
+import textwrap
 import time
 
 import yaml
@@ -166,6 +167,51 @@ _SQL_BAD = re.compile(
     r"\b(DROP|DELETE|INSERT|UPDATE|MERGE|ALTER|GRANT|REVOKE|TRUNCATE|COPY|EXTERNAL|LANGUAGE\s+PYTHON|LANGUAGE\s+SCALA|"
     r"LOCATION|USE|SET|CALL|EXECUTE|REFRESH|OPTIMIZE|VACUUM)\b", re.I)
 
+# Python functions (2026-11-04): a calculation or text/data transformation that needs no files, websites or keys
+# is made as a Unity Catalog Python function instead of an app. Why: a workspace allows 100 Databricks Apps (fixed),
+# and an app tool is attached whole, while a schema holds 10,000 functions, each shared with its own EXECUTE grant.
+# Verified live (centralindia): a Python function was created, returned the right margin (0.9375), and a website call
+# from inside one timed out, because Databricks runs them without network. The code is checked here as text (parsed,
+# never run): imports from a short list of calculation modules only, no files, no dynamic code, no dunder tricks.
+PY_FUNC_RE = re.compile(
+    r"^CREATE\s+FUNCTION\s+`?([\w.]+)`?\s*\((.*?)\)\s*RETURNS\s+([\w<>, ()]+?)\s+LANGUAGE\s+PYTHON\s*"
+    r"(?:COMMENT\s+'((?:[^']|'')*)'\s*)?AS\s*\$\$(.*)\$\$$", re.I | re.S)
+PY_IMPORTS = {"json", "math", "re", "datetime", "decimal", "statistics", "itertools", "collections", "functools",
+              "string", "fractions", "calendar", "textwrap", "unicodedata", "operator", "bisect", "heapq"}
+PY_BANNED_CALLS = {"open", "eval", "exec", "compile", "__import__", "getattr", "setattr", "delattr", "globals", "locals",
+                   "vars", "input", "breakpoint", "help", "memoryview", "exit", "quit"}
+
+
+def python_function_problems(body: str) -> list:
+    import ast
+
+    problems: list[str] = []
+    text = textwrap.dedent(body).strip("\n")
+    if not text.strip():
+        return ["The Python function needs code between $$ and $$."]
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        return ["The Python code does not parse (line %s: %s)." % (exc.lineno, exc.msg)]
+    if not any(isinstance(n, ast.Return) for n in ast.walk(tree)):
+        problems.append("The Python code must return its result.")
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            names = [a.name.split(".")[0] for a in n.names] if isinstance(n, ast.Import) else [(n.module or "").split(".")[0]]
+            bad = [x for x in names if x not in PY_IMPORTS]
+            if bad:
+                problems.append("A Python function may only import calculation modules (%s); not %s."
+                                % (", ".join(sorted(PY_IMPORTS)), ", ".join(bad)))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in PY_BANNED_CALLS:
+            problems.append("A Python function may not call %s()." % n.func.id)
+        elif isinstance(n, ast.Attribute) and n.attr.startswith("__"):
+            problems.append("A Python function may not use %s." % n.attr)
+        elif isinstance(n, ast.Name) and n.id.startswith("__") and n.id != "__name__":
+            problems.append("A Python function may not use %s." % n.id)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            problems.append("A Python function may not use global or nonlocal.")
+    return list(dict.fromkeys(problems))
+
 
 def _no_comments_or_extra(sql: str) -> str:
     s = sql.strip()
@@ -192,18 +238,31 @@ def analyze_function(item: dict) -> dict:
             problems.append("It must start with CREATE FUNCTION (not OR REPLACE, so nothing is overwritten).")
         elif name and m.group(1).replace("`", "").lower() != name.lower():
             problems.append("The name in the SQL must be the same as the function's name.")
-        if not re.search(r"\bRETURN\b", body, re.I):
-            problems.append("The SQL needs a RETURN with the calculation or query.")
-        bad = _SQL_BAD.search(re.sub(r"'(?:[^']|'')*'", "''", body))
-        if bad:
-            problems.append("The SQL may only define a calculation or query, not use %s." % bad.group(0).upper())
+        py = PY_FUNC_RE.match(body) if re.search(r"\bLANGUAGE\s+PYTHON\b", body, re.I) else None
+        if re.search(r"\bLANGUAGE\s+PYTHON\b", body, re.I) and not py:
+            problems.append("A Python function must be: CREATE FUNCTION catalog.schema.name(arguments) RETURNS type LANGUAGE "
+                            "PYTHON [COMMENT '...'] AS $$ code $$")
+        elif py:
+            header = body[: body.index("$$")]
+            bad = _SQL_BAD.search(re.sub(r"'(?:[^']|'')*'", "''", re.sub(r"\bLANGUAGE\s+PYTHON\b", "", header, flags=re.I)))
+            if bad:
+                problems.append("The function's header may not use %s." % bad.group(0).upper())
+            problems += python_function_problems(py.group(5))
+        else:
+            if not re.search(r"\bRETURN\b", body, re.I):
+                problems.append("The SQL needs a RETURN with the calculation or query.")
+            bad = _SQL_BAD.search(re.sub(r"'(?:[^']|'')*'", "''", body))
+            if bad:
+                problems.append("The SQL may only define a calculation or query, not use %s." % bad.group(0).upper())
     ex = _no_comments_or_extra(item.get("example", ""))
     if ex:
         if not re.match(r"^SELECT\b", ex, re.I) or ";" in ex or "--" in ex or "/*" in ex or _SQL_BAD.search(re.sub(r"'(?:[^']|'')*'", "''", ex)):
             problems.append("The example must be one plain SELECT that calls the function.")
         elif name and name.split(".")[-1].lower() not in ex.lower():
             problems.append("The example must call the function.")
-    return {"problems": problems, "report": {"kind": "uc_function", "reads_data": True, "changes_data": False}}
+    python = bool(re.search(r"\bLANGUAGE\s+PYTHON\b", body or "", re.I))
+    return {"problems": problems, "report": {"kind": "uc_function", "language": "python" if python else "sql",
+                                             "reads_data": not python, "changes_data": False, "calls_internet": False}}
 
 
 def run_sql(statement: str, warehouse_id: str, tok: str) -> list:

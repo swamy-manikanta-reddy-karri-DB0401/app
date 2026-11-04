@@ -889,8 +889,9 @@ TOOLS = (
             "parameters": _schema({"changes": _schema(_DRAFT_PROPS)}, ["changes"])}},
         {"type": "function", "function": {
             "name": "design_new_tool",
-            "description": "Propose a NEW tool when something needed does not exist. kind 'uc_function': a SQL function "
-                           "(give name, description, sql, example). kind 'mcp': a small tool written for you "
+            "description": "Propose a NEW tool when something needed does not exist. kind 'uc_function' (first choice): a SQL "
+                           "function, or a Python function (LANGUAGE PYTHON AS $$ ... $$) for calculations on its inputs; give "
+                           "name, description, sql (the whole CREATE FUNCTION statement) and example. kind 'mcp': a small tool written for you "
                            "(give slug, name, description, abilities, and any hosts, secrets, volumes). The code is written, "
                            "checked and shown to the admin to read before anything is created. Returns what it can reach, or what to fix.",
             "parameters": _schema({

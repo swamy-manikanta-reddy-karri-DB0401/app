@@ -106,6 +106,8 @@ export type DesignerNewTool = {
   fingerprint: string;
   report: {
     kind: "uc_function" | "mcp";
+    /** A function's language: Python functions run with no internet and no files. */
+    language?: "sql" | "python";
     hosts?: string[];
     settings?: string[];
     folders?: { volume: string; access: string }[];

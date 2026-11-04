@@ -132,9 +132,10 @@ def start(blob: bytes, display_name: str, description: str, app_name: str, who: 
 
 def _run(job: str, entry: dict, files: list, display_name: str, description: str, who: dict, tok: str) -> None:
     name = entry["app_name"]
-    # An app that already exists keeps answering from its old version, and reports RUNNING, while the new one goes
-    # in; so for a new version "running" also needs the active deployment to be newer than this upload (as
-    # tooltest.deployed_since does for repairs; ISO times in one format compare as text).
+    # "Running" is not enough: an app that already exists keeps answering from its old version (and reports RUNNING)
+    # while the new one goes in, and a new app's compute is ACTIVE before its first deployment has finished (seen
+    # live: the tests ran 30 s before the app had started). So the active deployment must have succeeded and be
+    # newer than this upload (as tooltest.deployed_since does for repairs; ISO times in one format compare as text).
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 5))
     try:
         mcps.install(entry, who, tok, files=files)
@@ -143,7 +144,7 @@ def _run(job: str, entry: dict, files: list, display_name: str, description: str
             apps, _ = mcps._apps(tok)
             state, line = mcps._state(apps.get(name), mcps._progress.get(name))
             _jobs[job]["step"] = line or "Deploying."
-            if state == "running" and (_jobs[job]["new"] or _live_since(apps.get(name) or {}, since)):
+            if state == "running" and _live_since(apps.get(name) or {}, since):
                 break
             if state == "failed":
                 if retries < mcps.DEPLOY_RETRIES and mcps.transient(line):

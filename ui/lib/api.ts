@@ -175,6 +175,39 @@ export type DesignerRules = {
   turns_per_day: number;
 };
 
+/** Developer mode: an agent whose code the AI writes (code_agent.py). */
+export type CodeSetup = {
+  name: string;
+  description: string;
+  framework: "mlflow" | "langgraph";
+  /** A custom agent to build on (its tools, data, documents, runbook), or "" to start with just a model. */
+  source: string;
+  model: string;
+  task: string;
+  write_folders: string[];
+  websites: string[];
+};
+export type CodeTest = { question: string; expect: string };
+export type CodeFileDiff = { path: string; state: "new" | "changed" | "same" | "removed"; lines: string[] };
+export type CodeWritten = {
+  code: Record<string, string>;
+  tests: CodeTest[];
+  summary: string;
+  problems: string[];
+  report: {
+    abilities: { name: string; about: string; inputs: string[] }[];
+    packages: string[];
+    websites: string[];
+    write_folders: string[];
+    files: string[];
+  };
+  diff: CodeFileDiff[];
+  fingerprint: string;
+  models: { code: string };
+};
+export type CodeTestResult = CodeTest & { answer: string; verdict: "pass" | "fail" | "ungraded"; reason: string; seconds: number };
+export type CodeJob<T> = { id: string; kind: string; state: "working" | "done" | "failed"; step: string; error: string; notes: string[]; result: T | null };
+
 /** One file of the draft, for the side panel (made from the draft; nothing is stored or run). */
 export type DraftFile = {
   path: string;
@@ -965,6 +998,36 @@ export const api = {
   },
   codeAgentJob: (job: string) =>
     request<{ state: string; step: string; app_name: string; note?: string; new?: boolean }>(`/api/admin/code-agents/jobs/${encodeURIComponent(job)}`),
+  codeAgentWrite: (setup: CodeSetup, models: Partial<DesignerModels>) =>
+    request<{ job: string }>("/api/admin/code-agents/ai/write", { setup, models }),
+  codeAgentChange: (setup: CodeSetup, code: Record<string, string>, request_: string, failures: CodeTestResult[], models: Partial<DesignerModels>) =>
+    request<{ job: string }>("/api/admin/code-agents/ai/change", { setup, code, request: request_, failures, models }),
+  codeAgentWriteJob: (id: string) => request<CodeJob<CodeWritten>>(`/api/admin/code-agents/ai/jobs/${encodeURIComponent(id)}`),
+  codeAgentTestJob: (id: string) =>
+    request<CodeJob<{ results: CodeTestResult[]; passed: number; judge: string }>>(`/api/admin/code-agents/ai/jobs/${encodeURIComponent(id)}`),
+  codeAgentDeploy: (setup: CodeSetup, code: Record<string, string>, tests: CodeTest[], approved: string, display_name: string, app_name: string) =>
+    request<{ job: string; app_name: string; new: boolean; files: number }>("/api/admin/code-agents/ai/deploy", {
+      setup, code, tests, approved, display_name, app_name,
+    }),
+  codeAgentTest: (app_name: string, tests: CodeTest[], models: Partial<DesignerModels>) =>
+    request<{ job: string }>("/api/admin/code-agents/ai/test", { app_name, tests, models }),
+  codeAgentZip: async (setup: CodeSetup, code: Record<string, string>, tests: CodeTest[]): Promise<{ blob: Blob; file: string }> => {
+    const res = await fetch("/api/admin/code-agents/ai/zip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setup, code, tests }),
+    });
+    if (!res.ok) {
+      let msg = `The download failed (${res.status})`;
+      try {
+        const j = await res.json();
+        msg = j.error || j.detail || msg;
+      } catch {}
+      throw new Error(msg);
+    }
+    const cd = res.headers.get("content-disposition") || "";
+    return { blob: await res.blob(), file: (cd.match(/filename="([^"]+)"/) || [])[1] || "agent.zip" };
+  },
   developerStatus: () => request<{ on: boolean; team: string }>("/api/admin/developer"),
   toolCode: (slug: string) =>
     request<{ slug: string; name: string; code: string; fingerprint: string }>(`/api/admin/designer/tool-code?slug=${encodeURIComponent(slug)}`),

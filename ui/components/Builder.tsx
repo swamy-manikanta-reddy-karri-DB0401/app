@@ -1,5 +1,6 @@
 "use client";
 
+import { CodeWriter } from "./custom/CodeWriter";
 import { CodeUpload } from "./custom/CodeUpload";
 import { BuildSettingsButton } from "./designer/Rules";
 import { useEffect, useRef, useState } from "react";
@@ -133,6 +134,7 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
     | { v: "designer" }
     | { v: "app"; agent: Agent | null }
     | { v: "upload" }
+    | { v: "write" }
     | { v: "custom"; id: string | null; initial: CustomSpec | null }
     | { v: "customPage"; id: string; warnings?: string[] }
   >({ v: "home" });
@@ -237,6 +239,16 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
         }}
         onEdit={(d) => setView({ v: "custom", id: d.id, initial: d.spec })}
         onTry={(k) => onTry?.(k)}
+      />
+    );
+  }
+  if (view.v === "write") {
+    return (
+      <CodeWriter
+        models={designer?.models || []}
+        customs={customs?.agents || []}
+        onCancel={() => setView({ v: "pick" })}
+        onDone={() => setView({ v: "home" })}
       />
     );
   }
@@ -387,6 +399,23 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
               </span>
             </span>
           </button>
+          {dev ? (
+            <button
+              type="button"
+              className="choice !p-6"
+              aria-pressed={false}
+              disabled={apps !== null && !apps.enabled}
+              onClick={() => setView({ v: "write" })}
+            >
+              <span>
+                <span className="block text-lg font-semibold">Write an agent&apos;s code with AI</span>
+                <span className="mt-1 block text-[15px] muted">
+                  Say what it should do. AI writes the code, you read and approve every line, and the portal deploys and tests it.
+                </span>
+                <span className="mt-3 block text-[13px] faint">Developer mode</span>
+              </span>
+            </button>
+          ) : null}
           {dev ? (
             <button
               type="button"

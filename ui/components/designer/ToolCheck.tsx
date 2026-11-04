@@ -51,7 +51,7 @@ function inputWords(args: Record<string, unknown>): string {
   return bits.length ? "with " + bits.join(", ") : "with nothing extra";
 }
 
-function Diff({ lines }: { lines: string[] }) {
+export function Diff({ lines }: { lines: string[] }) {
   return (
     <pre
       className="max-h-[360px] overflow-auto rounded-xl p-3 text-[12.5px] leading-5"

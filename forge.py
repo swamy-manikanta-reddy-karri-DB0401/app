@@ -963,11 +963,11 @@ def item_from_workspace(slug: str, tok: str) -> dict:
     return item
 
 
-def code_diff(old: str, new: str, context: int = 3, limit: int = 220) -> list[str]:
+def code_diff(old: str, new: str, context: int = 3, limit: int = 220, names: tuple = ("current", "repaired")) -> list[str]:
     """A unified diff of the model-written code, for the admin to read before a repair is applied."""
     import difflib
 
-    lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(), "current", "repaired", lineterm="", n=context))
+    lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(), names[0], names[1], lineterm="", n=context))
     return lines[:limit] + (["... (the rest is not shown)"] if len(lines) > limit else [])
 
 

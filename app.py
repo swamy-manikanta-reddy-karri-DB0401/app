@@ -31,6 +31,7 @@ import attachments
 import audit
 import builder
 import chat
+import code_agent
 import code_upload
 import genie
 import knowledge
@@ -1564,6 +1565,92 @@ async def code_agent_upload(
     events.note(action="uploaded_agent", target="app:" + out["app_name"], label=display_name,
                 detail={"files": out["files"], "new": out["new"]})
     return out
+
+
+def _code_setup(payload: dict, tok: str) -> dict:
+    setup = code_agent.clean_setup(payload.get("setup") or {})
+    if setup["model"]:
+        offered = {m["name"] for m in designer_models.catalog(tok)}
+        if offered and setup["model"] not in offered:
+            raise HTTPException(400, "That model is not one you can use. Choose another.")
+    return setup
+
+
+@app.post("/api/admin/code-agents/ai/write")
+def code_agent_write(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Developer mode: the code model writes an agent's code from the developer's words (code_agent.py). Runs in
+    the background; nothing is deployed or run. What they type is checked like the designer's chat."""
+    who, tok = _require_developer(x_forwarded_access_token)
+    setup = _code_setup(payload, tok)
+    designer_guard.count_turn(who)
+    _tool_words(setup["task"], "What should the agent you are writing code for do?", payload, tok)
+    j = code_agent.start_write(setup, who, tok, payload.get("models"))
+    return {"job": j["id"]}
+
+
+@app.post("/api/admin/code-agents/ai/change")
+def code_agent_change(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """A change asked in words, or failed tests to fix: edits to the code, shown again before anything is deployed."""
+    who, tok = _require_developer(x_forwarded_access_token)
+    setup = _code_setup(payload, tok)
+    request = " ".join(str(payload.get("request") or "").split())[:1500]
+    failures = [f for f in payload.get("failures") or [] if isinstance(f, dict)][:6]
+    if not request and not failures:
+        raise HTTPException(400, "Say what should change, or which tests failed.")
+    designer_guard.count_turn(who)
+    if request:
+        _tool_words(request, "What should change in the code of the agent %s?" % setup["name"], payload, tok)
+    code = {k: str(v) for k, v in (payload.get("code") or {}).items() if isinstance(k, str)}
+    j = code_agent.start_write(setup, who, tok, payload.get("models"), current=code_agent.editable(code), request=request,
+                               failures=failures)
+    return {"job": j["id"]}
+
+
+@app.get("/api/admin/code-agents/ai/jobs/{job_id}")
+def code_agent_job(job_id: str, x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_developer(x_forwarded_access_token)
+    return code_agent.job(job_id, who)
+
+
+@app.post("/api/admin/code-agents/ai/deploy")
+def code_agent_deploy(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Deploy exactly the approved code (its fingerprint) as an app and offer it as an assistant; progress is the
+    upload's own job (/api/admin/code-agents/jobs/{id})."""
+    who, tok = _require_developer(x_forwarded_access_token)
+    setup = _code_setup(payload, tok)
+    code = code_agent.editable({k: str(v) for k, v in (payload.get("code") or {}).items() if isinstance(k, str)})
+    out = code_agent.deploy(setup, code, payload.get("tests") or [], str(payload.get("approved") or ""),
+                            str(payload.get("display_name") or ""), str(payload.get("app_name") or "").strip(), who, tok)
+    events.note(action="uploaded_agent", target="app:" + out["app_name"], label=setup["name"],
+                detail={"files": out["files"], "new": out["new"], "via": "ai", "framework": setup["framework"]})
+    return out
+
+
+@app.post("/api/admin/code-agents/ai/test")
+def code_agent_test(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Ask the deployed agent its tests as the developer and mark each answer with another model (background)."""
+    who, tok = _require_developer(x_forwarded_access_token)
+    tests = code_agent.clean_tests(payload.get("tests"))
+    if not tests:
+        raise HTTPException(400, "Add at least one test question with what a good answer does.")
+    name = str(payload.get("app_name") or "")
+    if not code_upload.APP_RE.match(name):
+        raise HTTPException(400, "Which app?")
+    j = code_agent.start_tests(name, tests, who, tok, payload.get("models"))
+    return {"job": j["id"]}
+
+
+@app.post("/api/admin/code-agents/ai/zip")
+def code_agent_zip(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """The whole project as a ZIP, so the developer owns the code."""
+    who, tok = _require_developer(x_forwarded_access_token)
+    setup = _code_setup(payload, tok)
+    code = code_agent.editable({k: str(v) for k, v in (payload.get("code") or {}).items() if isinstance(k, str)})
+    files = code_agent.assemble(setup, code, tok, code_agent.clean_tests(payload.get("tests")))
+    root = agent_export._slug(setup["name"]) + "-" + setup["framework"]
+    events.note(action="exported_agent", target="code:" + root, label=setup["name"], detail={"framework": setup["framework"], "via": "ai"})
+    return Response(agent_export.zip_of(files, root), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="%s.zip"' % root})
 
 
 @app.get("/api/admin/code-agents/jobs/{job_id}")

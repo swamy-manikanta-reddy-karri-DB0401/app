@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { CodeCheck, CodeRound } from "@/lib/api";
+import type { CodeCheck, CodeRound, SandboxRun } from "@/lib/api";
 import { Diff } from "../designer/ToolCheck";
 import { CheckIcon, FileIcon, LockIcon, PencilIcon } from "../icons";
 import { CodeEditor, marksFor } from "./CodeEditor";
@@ -170,6 +170,7 @@ function Activity({ rounds, active }: { rounds: CodeRound[]; active: CodeRound |
       <p className="text-[11.5px] font-semibold uppercase tracking-wide faint">Activity</p>
       <ol className="mt-2 space-y-2 text-[13px]">
         {rounds.map((r, i) => {
+          if (r.kind === "try") return <TryLine key={i} tried={r.tried} running={r === active && r.problems === null} />;
           const running = r === active && r.problems === null;
           const edits = r.kind === "fix" || r.kind === "change" ? parseEdits(r.text) : [];
           const files = r.kind !== "fix" ? parseFiles(r.text) : [];
@@ -218,6 +219,59 @@ function Activity({ rounds, active }: { rounds: CodeRound[]; active: CodeRound |
         })}
       </ol>
     </div>
+  );
+}
+
+/** One try in the sandbox, in the activity list. */
+function TryLine({ tried, running }: { tried?: SandboxRun; running: boolean }) {
+  if (running || !tried) return <li className="font-medium">Trying it in the sandbox…</li>;
+  if (tried.skipped) return <li className="faint">Not tried in the sandbox: {tried.skipped}</li>;
+  const res = tried.results || [];
+  const passed = res.filter((x) => x.ok).length;
+  return (
+    <li>
+      <span className="font-medium">Tried in the sandbox</span>
+      <span className="faint">
+        {" "}
+        · {passed} of {res.length} checks passed{tried.seconds !== undefined ? ` in ${tried.seconds} s` : ""}
+      </span>
+      <SandboxResults tried={tried} only="failed" />
+    </li>
+  );
+}
+
+/** The quick checks' results: each check with what went wrong and where. */
+export function SandboxResults({ tried, only }: { tried: SandboxRun; only?: "failed" }) {
+  const res = (tried.results || []).filter((x) => (only === "failed" ? x.ok === false : true));
+  return (
+    <>
+      {tried.error ? <p className="mt-1 text-[13px]" style={{ color: "var(--err)" }}>{tried.error}</p> : null}
+      {res.length ? (
+        <ul className="mt-1 space-y-1">
+          {res.map((x) => (
+            <li key={x.name} className="flex items-start gap-2 text-[13px]">
+              <span
+                className="mt-0.5 shrink-0 rounded-full px-1.5 text-[11px] font-bold"
+                style={
+                  x.ok
+                    ? { background: "color-mix(in srgb, var(--ok) 16%, transparent)", color: "var(--ok)" }
+                    : x.ok === null
+                      ? { background: "var(--bubble)", color: "var(--ink-faint)" }
+                      : { background: "color-mix(in srgb, var(--err) 14%, transparent)", color: "var(--err)" }
+                }
+              >
+                {x.ok ? "PASS" : x.ok === null ? "SKIP" : "FAIL"}
+              </span>
+              <span className="min-w-0 break-words">
+                <span className="font-mono text-[12.5px]">{x.name}</span>
+                {x.error ? <span className="muted"> {x.error}</span> : null}
+                {x.where ? <span className="block font-mono text-[12px] faint">{x.where}</span> : null}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </>
   );
 }
 

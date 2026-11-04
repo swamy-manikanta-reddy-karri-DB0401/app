@@ -207,9 +207,20 @@ export type CodeWritten = {
   models: { chat: string; code: string; judge: string };
   /** The portal's own files (app.py, agent/tools.py, agent/config.json), shown locked. */
   fixed: Record<string, string>;
+  /** The last try of its quick checks in the sandbox (null when it could not be tried). */
+  tried: SandboxRun | null;
 };
-/** One model reply while it writes: its text so far, then what the checks found after it (null = not checked yet). */
-export type CodeRound = { kind: "write" | "change" | "fix"; text: string; problems: string[] | null };
+/** One model reply while it writes: its text so far, then what the checks found after it (null = not checked yet).
+ *  A "try" round is the agent's own checks run in the try-out sandbox. */
+export type CodeRound = { kind: "write" | "change" | "fix" | "try"; text: string; problems: string[] | null; tried?: SandboxRun };
+/** The try-out sandbox (sandbox.py): runs the AI's quick checks in seconds, with nothing real reachable. */
+export type SandboxStatus = {
+  state: "none" | "setting_up" | "starting" | "ready" | "outdated" | "stopped" | "failed" | "taken";
+  note: string;
+  url: string;
+};
+export type SandboxCheck = { name: string; ok: boolean | null; error: string; where: string; printed: string; seconds: number };
+export type SandboxRun = { ok?: boolean; results?: SandboxCheck[]; error?: string; seconds?: number; skipped?: string; problems?: string[] };
 export type CodeCheck = {
   problems: string[];
   report: CodeWritten["report"];
@@ -1070,6 +1081,10 @@ export const api = {
     const cd = res.headers.get("content-disposition") || "";
     return { blob: await res.blob(), file: (cd.match(/filename="([^"]+)"/) || [])[1] || "agent.zip" };
   },
+  sandboxStatus: () => request<SandboxStatus>("/api/admin/code-agents/sandbox"),
+  sandboxSetup: () => request<SandboxStatus>("/api/admin/code-agents/sandbox", {}),
+  /** Try the code as it is now (a hand edit) in the sandbox. */
+  codeAgentTry: (setup: CodeSetup, code: Record<string, string>) => request<SandboxRun>("/api/admin/code-agents/ai/try", { setup, code }),
   developerStatus: () => request<{ on: boolean; team: string }>("/api/admin/developer"),
   toolCode: (slug: string) =>
     request<{ slug: string; name: string; code: string; fingerprint: string }>(`/api/admin/designer/tool-code?slug=${encodeURIComponent(slug)}`),

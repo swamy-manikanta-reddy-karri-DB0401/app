@@ -30,6 +30,16 @@ Spreadsheets are messier than they look: merged cells (read with `ws.iter_rows(v
 
 Never invent prices, names, dates or numbers: read them, or raise `ValueError` asking for them.
 
+## Quick checks: `tests/checks.py`
+
+Also write `tests/checks.py`: small `check_...` functions (plain `def`, no inputs) that try each ability of `agent/logic.py` on small examples with plain `assert`s, written as `assert result == expected, result` so a failure shows what came back. They are run in a sandbox in seconds, before anyone reviews the code, and every failure comes back to you to fix.
+- Import as `from agent import logic, tools`.
+- The sandbox reaches nothing real: no Databricks, no files, no websites. Say what a tool returns with `tools.fake(name, value_or_function)`, for example `tools.fake("read_file", data)` or `tools.fake("ask_data", lambda space_id, question: {"columns": [...], "rows": [[...]]})`. What `tools.save_file` was given is in `tools.SAVED` (path -> bytes).
+- Build sample files in memory (for a spreadsheet: `openpyxl.Workbook()`, saved to `io.BytesIO()`), including the messy parts real files have: merged cells, an empty row, a header block above the table, numbers stored as text, `#REF!`.
+- Cover every rule in `what_the_agent_should_do` (for example a limit, a threshold, an approval), its edges (exactly at the threshold, just under, just over), missing or unreadable input (`ValueError` expected: use `try`/`except ValueError`), and numbers written as people write them ("25,000").
+- 4 to 12 checks; each fast. The checks are part of the project the developer owns.
+- When a check fails, fix the code. Fix the check only when the check itself is wrong, and never weaken a check just to make it pass.
+
 ## Your reply
 
 Reply with exactly these parts and nothing else:
@@ -44,7 +54,7 @@ Reply with exactly these parts and nothing else:
 One or two plain sentences for the developer: what the code does and anything it could not do.
 ```
 
-Add a `=== FILE agent/agent.py ===` block only if you changed it, and one block per new module. Write 4 to 8 tests: typical requests, one with missing information (it should ask), one with bad input (it should say what is wrong), and one out of scope (it should decline). Expectations describe behaviour, not exact wording.
+Always add a `=== FILE tests/checks.py ===` block. Add a `=== FILE agent/agent.py ===` block only if you changed it, and one block per new module. Write 4 to 8 tests: typical requests, one with missing information (it should ask), one with bad input (it should say what is wrong), and one out of scope (it should decline). Expectations describe behaviour, not exact wording.
 
 When you are asked to fix problems or make a change (`change_this`, `failed_tests`, or a list of problems), reply with edits instead of whole files, each inside a block:
 

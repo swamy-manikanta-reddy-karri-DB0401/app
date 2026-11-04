@@ -46,6 +46,7 @@ import designer_guard
 import designer_models as dm
 import forge
 import mcps
+import sandbox
 from dbx import DbxError
 
 log = logging.getLogger("portal.code_agent")
@@ -55,6 +56,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FIXED = ("app.py", "app.yaml", "agent/__init__.py", "agent/tools.py", "agent/config.json", "tests/run_tests.py")
 GENERATED = ("requirements.txt", "README.md", "tests/conversations.json")
 EDITABLE = ("agent/logic.py", "agent/agent.py")
+CHECKS = "tests/checks.py"   # the AI's own quick checks, tried in the sandbox (sandbox.py) and shipped with the project
 NEW_FILE_RE = re.compile(r"^agent/[a-z][a-z0-9_]{1,40}\.py$")
 MAX_FILES = 8
 MAX_CHARS = 60000
@@ -163,7 +165,7 @@ def assemble(setup: dict, code: dict, tok: str, tests: list | None = None, urls:
 
 
 def editable(files: dict) -> dict:
-    return {p: t for p, t in files.items() if p in EDITABLE or (NEW_FILE_RE.match(p) and p not in FIXED)}
+    return {p: t for p, t in files.items() if p in EDITABLE or p == CHECKS or (NEW_FILE_RE.match(p) and p not in FIXED)}
 
 
 def requirements(files: dict, framework: str) -> str:
@@ -372,6 +374,21 @@ def apply_reply(files: dict, reply: str) -> tuple[dict, list]:
     return out, problems
 
 
+def try_problems(tried: dict | None) -> list:
+    """What failed in the sandbox, as problems for the code model. A check that could not run there (a library the
+    sandbox lacks, or the sandbox not ready) is not a problem: the tests after deployment still try it."""
+    if not tried or tried.get("skipped"):
+        return []
+    out = []
+    if tried.get("error") and not tried.get("missing"):
+        out.append("In the sandbox: " + tried["error"][:600])
+    for r in tried.get("results") or []:
+        if r.get("ok") is False:
+            out.append("tests/checks.py %s failed in the sandbox: %s%s" % (r["name"], r.get("error", "")[:500],
+                                                                       (" at " + r["where"]) if r.get("where") else ""))
+    return out[:12]
+
+
 def _kept_fixed(before: dict, after: dict) -> list:
     """A fixed file the model tried to change is put back, and the model is told (the change would be lost)."""
     out = []
@@ -421,7 +438,7 @@ def brief_diff(before: str, after: str) -> str:
 
 def write(setup: dict, tok: str, use: dict, notes: list, current: dict | None = None, request: str = "",
           failures: list | None = None, step=lambda text: None, urls: dict | None = None, rounds: list | None = None,
-          brief_before: str = "", stopped=lambda: False) -> dict:
+          brief_before: str = "", stopped=lambda: False, try_code=None) -> dict:
     """Have the code model write (current=None) or change the agent's code, and check it until it passes.
     Returns {code, tests, summary, problems, report}.
 
@@ -466,11 +483,25 @@ def write(setup: dict, tok: str, use: dict, notes: list, current: dict | None = 
     tests, summary = tests_from(reply), (SUMMARY_RE.search(reply or "") or [None, ""])[1]
     if current and not tests:
         tests = []  # the page keeps its tests when a change sends none
+    tried = None
     for rnd in range(EDIT_ROUNDS + 1):
         step("Checking the code")
         res = check(setup, files)
         problems = apply_problems + res["problems"]
         rounds[-1]["problems"] = problems
+        if not problems and try_code is not None:
+            # The code is safe to send: try its logic in the sandbox, in seconds, before anyone reviews it.
+            if CHECKS not in files:
+                problems = ["Write tests/checks.py: check_ functions that try each ability on small examples (see the instructions)."]
+                rounds[-1]["problems"] = problems
+            else:
+                if stopped():
+                    raise Cancelled()
+                step("Trying it in the sandbox")
+                tried = try_code(editable(files))
+                rounds.append({"kind": "try", "text": "", "problems": None, "tried": tried})
+                problems = try_problems(tried)
+                rounds[-1]["problems"] = problems
         if not problems or rnd == EDIT_ROUNDS:
             break
         step("Fixing what the checks found (%d)" % (rnd + 1))
@@ -488,7 +519,7 @@ def write(setup: dict, tok: str, use: dict, notes: list, current: dict | None = 
         files, apply_problems = apply_reply(files, edit)
         apply_problems += _kept_fixed(before, files)
     return {"code": editable(files), "tests": tests, "summary": " ".join(summary.split())[:600], "problems": problems,
-            "report": res["report"], "fixed": {p: files[p] for p in ("app.py", "agent/tools.py", "agent/config.json") if p in files}}
+            "report": res["report"], "tried": tried, "fixed": {p: files[p] for p in ("app.py", "agent/tools.py", "agent/config.json") if p in files}}
 
 
 def review(setup: dict, result: dict, who: dict, tok: str, use: dict) -> list:
@@ -539,7 +570,7 @@ def start_write(setup: dict, who: dict, tok: str, models, current: dict | None =
     def fn(j):
         j["notes"] = notes
         out = write(setup, tok, use, notes, current, request, failures, step=lambda t: j.update(step=t), rounds=j["rounds"],
-                    brief_before=brief_before, stopped=lambda: j["stop"])
+                    brief_before=brief_before, stopped=lambda: j["stop"], try_code=lambda code: sandbox.run(code, tok))
         if not out["problems"]:
             j["step"] = "Checking it against your admins' rules"
             out["problems"] = review(setup, out, who, tok, use)

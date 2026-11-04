@@ -91,6 +91,7 @@ CATEGORY = {
     "designer_refused": "build",
     "exported_agent": "build",
     "uploaded_agent": "build",
+    "sandbox": "build",
     "forgot_memory": "questions",
 }
 

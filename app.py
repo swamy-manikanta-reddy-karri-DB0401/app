@@ -39,6 +39,7 @@ import chats
 import connections
 import custom_agents
 import safety
+import sandbox
 import dashboard
 import designer
 import designer_files
@@ -1620,6 +1621,36 @@ def code_agent_check(payload: dict = Body(...), x_forwarded_access_token: str = 
     prev = payload.get("previous")
     prev = code_agent.editable({k: str(v) for k, v in prev.items() if isinstance(k, str)}) if isinstance(prev, dict) else None
     return code_agent.check_code(setup, code, tok, prev)
+
+
+@app.get("/api/admin/code-agents/sandbox")
+def code_agent_sandbox(x_forwarded_access_token: str = Header(None)):
+    """Is the try-out sandbox there and on (sandbox.py)?"""
+    _, tok = _require_developer(x_forwarded_access_token)
+    return sandbox.status(tok)
+
+
+@app.post("/api/admin/code-agents/sandbox")
+def code_agent_sandbox_setup(x_forwarded_access_token: str = Header(None)):
+    """Set the sandbox up (once; it uses one of the workspace's apps) or switch it on."""
+    who, tok = _require_developer(x_forwarded_access_token)
+    out = sandbox.setup(who, tok)
+    events.note(action="sandbox", target="app:" + sandbox.NAME, label="Try-out sandbox", detail={"state": out["state"]})
+    return out
+
+
+@app.post("/api/admin/code-agents/ai/try")
+def code_agent_try(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """Try the code as it is now (a hand edit) in the sandbox: the static checks first, then tests/checks.py."""
+    _, tok = _require_developer(x_forwarded_access_token)
+    setup = _code_setup(payload, tok)
+    code = code_agent.editable({k: str(v) for k, v in (payload.get("code") or {}).items() if isinstance(k, str)})
+    res = code_agent.check_code(setup, code, tok)
+    if res["problems"]:
+        return {"skipped": "Fix the problems the checks found first; then it can be tried.", "problems": res["problems"]}
+    if code_agent.CHECKS not in code:
+        return {"skipped": "There is no tests/checks.py to try."}
+    return sandbox.run(code, tok)
 
 
 @app.post("/api/admin/code-agents/ai/jobs/{job_id}/stop")

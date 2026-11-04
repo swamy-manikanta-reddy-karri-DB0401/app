@@ -362,6 +362,8 @@ function sentence(e: PortalEvent): ReactNode {
       return <>{name} retired {b(label)}</>;
     case "designer_refused":
       return <>The assistant designer refused a message from {name}: {d.why === "against_rule" ? "against your rules for the designer" : "not about building assistants or tools"}</>;
+    case "sandbox":
+      return <>{name} {d.state === "setting_up" ? "set up" : "switched on"} the try-out sandbox for code</>;
     case "uploaded_agent":
       return <>{name} {d.new ? "deployed" : "deployed a new version of"} {b(label)} from code ({d.files ?? "?"} files)</>;
     case "exported_agent":

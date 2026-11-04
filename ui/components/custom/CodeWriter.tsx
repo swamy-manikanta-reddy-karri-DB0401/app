@@ -2,11 +2,22 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import type { CodeCheck, CodeRound, CodeSetup, CodeTest, CodeTestResult, CodeWritten, CustomSummary, DesignerModel } from "@/lib/api";
+import type {
+  CodeCheck,
+  CodeRound,
+  CodeSetup,
+  CodeTest,
+  CodeTestResult,
+  CodeWritten,
+  CustomSummary,
+  DesignerModel,
+  SandboxRun,
+  SandboxStatus,
+} from "@/lib/api";
 import { chosen, loadChoice, modelDetail } from "@/lib/designerModels";
 import { ErrorBox, Select, Spinner } from "../bits";
 import { CheckIcon, DownloadIcon, PlusIcon, TrashIcon } from "../icons";
-import { CodeIDE, LiveWriting } from "./CodeWorkbench";
+import { CodeIDE, LiveWriting, SandboxResults } from "./CodeWorkbench";
 import { BriefPanel } from "./CodeBrief";
 
 /** Developer mode: the AI writes an agent's code (code_agent.py). Describe it; the code model writes it into the
@@ -73,6 +84,33 @@ export function CodeWriter({
   const [checking, setChecking] = useState(false);
   const checkSeq = useRef(0);
   const jobRef = useRef("");
+  // the try-out sandbox: checks the AI's logic in seconds while it writes (sandbox.py)
+  const [box, setBox] = useState<SandboxStatus | null>(null);
+  const [boxBusy, setBoxBusy] = useState(false);
+  const [tried, setTried] = useState<SandboxRun | null>(null);
+  const [trying, setTrying] = useState(false);
+  useEffect(() => {
+    let stop = false;
+    let started = false;
+    const look = async () => {
+      try {
+        let s = await api.sandboxStatus();
+        // already set up and switched off to save cost: the developer opened the writer, so switch it on
+        if ((s.state === "stopped" || s.state === "outdated") && !started) {
+          started = true;
+          s = await api.sandboxSetup();
+        }
+        if (!stop) setBox(s);
+        if (!stop && ["setting_up", "starting", "outdated"].includes(s.state)) setTimeout(look, 10000);
+      } catch {
+        if (!stop) setBox(null);
+      }
+    };
+    look();
+    return () => {
+      stop = true;
+    };
+  }, [boxBusy]);
   const runRef = useRef<Promise<void> | null>(null);
   const alive = useRef(true);
   useEffect(
@@ -107,6 +145,7 @@ export function CodeWriter({
         setCode(r.code);
         setCheck({ problems: r.problems, report: r.report, diff: r.diff, fingerprint: r.fingerprint });
         if (r.tests.length) setTests(r.tests);
+        setTried(r.tried || null);
         setRead(false);
         setStage("review");
         jobRef.current = "";
@@ -226,6 +265,28 @@ export function CodeWriter({
     }
   }
 
+  async function tryAgain() {
+    setTrying(true);
+    setErr("");
+    try {
+      setTried(await api.codeAgentTry(setup, code));
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setTrying(false);
+    }
+  }
+
+  async function setUpBox() {
+    setErr("");
+    try {
+      setBox(await api.sandboxSetup());
+      setBoxBusy((b) => !b);
+    } catch (e: any) {
+      setErr(e.message);
+    }
+  }
+
   async function deployIt() {
     if (!written) return;
     setErr("");
@@ -307,6 +368,7 @@ export function CodeWriter({
         <span className="rounded-full px-2 py-0.5 text-[11px] font-semibold" style={{ background: "var(--brand-soft)", color: "var(--brand-deep)" }}>
           Developer mode
         </span>
+        <SandboxChip box={box} onSetUp={setUpBox} />
       </div>
       <ol className="mb-4 flex flex-wrap gap-2 text-[13px]" aria-label="Steps">
         {STAGES.map(([s, label], i) => (
@@ -519,6 +581,53 @@ export function CodeWriter({
             </button>
           </div>
 
+          <div className="card p-6">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-[17px] font-semibold">Quick checks</h3>
+              <button type="button" className="btn btn-quiet" disabled={trying || !code["tests/checks.py"]} onClick={tryAgain}>
+                {trying ? "Trying…" : "Try again in the sandbox"}
+              </button>
+            </div>
+            <p className="mt-1 text-[13px] muted">
+              The AI&apos;s own checks in tests/checks.py, run in the sandbox in seconds: the logic on small examples, with nothing real
+              reachable. Try again after editing the code yourself.
+            </p>
+            {tried ? (
+              tried.skipped ? (
+                <p className="mt-3 text-[13.5px] faint">Not tried: {tried.skipped}</p>
+              ) : (
+                <div className="mt-3">
+                  <p className="text-[14px] font-medium">
+                    {(tried.results || []).filter((x) => x.ok).length} of {(tried.results || []).length} checks passed
+                    {tried.seconds !== undefined ? <span className="faint"> · {tried.seconds} s</span> : null}
+                  </p>
+                  <SandboxResults tried={tried} />
+                  {(tried.results || []).some((x) => x.ok === false) ? (
+                    <button
+                      type="button"
+                      className="btn btn-quiet mt-3"
+                      onClick={() =>
+                        run(
+                          changeIt(
+                            "These quick checks fail in the sandbox: " +
+                              (tried.results || [])
+                                .filter((x) => x.ok === false)
+                                .map((x) => `${x.name}: ${x.error} ${x.where}`)
+                                .join(" | ")
+                          )
+                        )
+                      }
+                    >
+                      Ask the AI to fix them
+                    </button>
+                  ) : null}
+                </div>
+              )
+            ) : (
+              <p className="mt-3 text-[13.5px] faint">Not tried yet.</p>
+            )}
+          </div>
+
           <TestsEditor tests={tests} onChange={setTests} />
 
           <div className="card p-6">
@@ -616,6 +725,36 @@ export function CodeWriter({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** Where the try-out sandbox is: ready, starting, or not set up (with the button to set it up, once). */
+function SandboxChip({ box, onSetUp }: { box: SandboxStatus | null; onSetUp: () => void }) {
+  if (!box) return null;
+  const tone =
+    box.state === "ready" ? "var(--ok)" : box.state === "failed" || box.state === "taken" ? "var(--err)" : "var(--ink-faint)";
+  const label =
+    box.state === "ready"
+      ? "Sandbox ready"
+      : box.state === "none"
+        ? "No sandbox"
+        : box.state === "stopped"
+          ? "Sandbox off"
+          : box.state === "failed" || box.state === "taken"
+            ? "Sandbox unavailable"
+            : "Sandbox starting…";
+  return (
+    <span className="ml-auto flex flex-wrap items-center gap-2 text-[12.5px]" title={box.note}>
+      <span className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1" style={{ borderColor: "var(--line)" }}>
+        <span aria-hidden className="h-2 w-2 rounded-full" style={{ background: tone }} />
+        {label}
+      </span>
+      {box.state === "none" ? (
+        <button type="button" className="btn btn-quiet !min-h-[30px] !py-1 text-[12.5px]" onClick={onSetUp} title={box.note}>
+          Set up (uses 1 app)
+        </button>
+      ) : null}
+    </span>
   );
 }
 

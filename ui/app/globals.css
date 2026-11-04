@@ -1114,3 +1114,22 @@ h1, h2, h3, h4,
 .pulse-dot { width: 8px; height: 8px; border-radius: 999px; background: var(--brand); animation: code-pulse 1.2s ease-in-out infinite; }
 @keyframes code-pulse { 50% { opacity: .35; transform: scale(.8); } }
 @media (prefers-reduced-motion: reduce) { .pulse-dot { animation: none; } }
+
+/* Build > Create assistant (BuildPicker.tsx) */
+.pick-card { display: flex; flex-direction: column; text-align: left; padding: 22px; border-radius: 18px; border: 1px solid var(--line);
+  background: var(--surface); box-shadow: var(--shadow); transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; min-width: 0; }
+.pick-card:hover:not(:disabled) { border-color: color-mix(in srgb, var(--brand) 55%, var(--line)); box-shadow: var(--shadow-lg); transform: translateY(-2px); }
+.pick-card:focus-visible, .pick-row:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.pick-card:disabled, .pick-row:disabled { opacity: .55; cursor: not-allowed; }
+.pick-badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 600;
+  background: var(--brand-soft); color: var(--brand-deep); white-space: nowrap; }
+.pick-use { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 500;
+  border: 1px dashed var(--line); color: var(--ink-faint); }
+.pick-use.on { border-style: solid; border-color: transparent; background: var(--bubble); color: var(--ink); }
+.pick-example { display: flex; gap: 10px; margin-top: 14px; padding: 11px 13px; border-radius: 12px; background: var(--bubble); }
+.pick-go { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--brand-deep); transition: gap .15s ease; }
+.pick-card:hover:not(:disabled) .pick-go { gap: 8px; }
+.pick-row { display: flex; align-items: center; gap: 12px; text-align: left; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--line);
+  background: var(--surface); transition: border-color .15s ease, background-color .15s ease; min-width: 0; }
+.pick-row:hover:not(:disabled) { border-color: color-mix(in srgb, var(--brand) 50%, var(--line)); background: color-mix(in srgb, var(--brand-soft) 35%, var(--surface)); }
+@media (prefers-reduced-motion: reduce) { .pick-card, .pick-card:hover:not(:disabled) { transform: none; transition: none; } }

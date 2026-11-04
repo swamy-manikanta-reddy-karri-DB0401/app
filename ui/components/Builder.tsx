@@ -1,5 +1,6 @@
 "use client";
 
+import { BuildPicker } from "./BuildPicker";
 import { CodeWriter } from "./custom/CodeWriter";
 import { CodeUpload } from "./custom/CodeUpload";
 import { BuildSettingsButton } from "./designer/Rules";
@@ -269,12 +270,30 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
           <button type="button" className="btn btn-quiet" onClick={() => setView({ v: "home" })}>
             ← Cancel
           </button>
-          <h2 className="text-xl font-semibold">What kind of assistant do you want to create?</h2>
+          <div className="min-w-0">
+            <h2 className="text-[24px] font-semibold leading-tight tracking-[-0.02em]">What do you want to build?</h2>
+            <p className="mt-0.5 text-[14.5px] muted">Pick the one that sounds like the job. Nothing is created until you have seen it.</p>
+          </div>
         </div>
-        {designer?.enabled ? (
-          <>
-            <section
-              className="mb-6 overflow-hidden rounded-2xl"
+        <BuildPicker
+          dev={dev}
+          customsOff={customs !== null && !customs.enabled ? customs.reason : undefined}
+          appsOff={apps !== null && !apps.enabled ? apps.reason : undefined}
+          onPick={(t) =>
+            setView(
+              t === "custom"
+                ? { v: "custom", id: null, initial: null }
+                : t === "app"
+                  ? { v: "app", agent: null }
+                  : t === "write" || t === "upload"
+                    ? { v: t }
+                    : { v: t, id: null }
+            )
+          }
+          hero={
+            designer?.enabled ? (
+              <section
+              className="overflow-hidden rounded-2xl"
               style={{
                 background: "radial-gradient(120% 160% at 0% 0%, var(--brand-soft) 0%, var(--surface) 60%)",
                 border: "1px solid color-mix(in srgb, var(--brand) 45%, var(--line))",
@@ -324,120 +343,13 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
                 </div>
               </div>
             </section>
-            <div className="mb-4 flex items-center gap-3 text-sm muted">
-              <span>Or choose the kind yourself</span>
-              <span aria-hidden className="h-px flex-1" style={{ background: "var(--line)" }} />
-            </div>
-          </>
-        ) : null}
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(320px,100%),1fr))] gap-4">
-          <button
-            type="button"
-            className="choice !p-6"
-            aria-pressed={false}
-            disabled={customs !== null && !customs.enabled}
-            onClick={() => setView({ v: "custom", id: null, initial: null })}
-          >
-            <span>
-              <span className="flex flex-wrap items-center gap-2 text-lg font-semibold">
-                Custom agent <Tag title="Tested and approved before anyone else can use it">Test and release</Tag>
-              </span>
-              <span className="mt-1 block text-[15px] muted">
-                You choose its AI model and what it can use: documents, tools, data and other assistants. It is tested, then approved
-                by people you choose, before anyone else can use it.
-              </span>
-              <span className="mt-3 block text-[13px] faint">
-                {customs !== null && !customs.enabled ? customs.reason : "Good for: agents that need a review before release"}
-              </span>
-            </span>
-          </button>
-          <button type="button" className="choice !p-6" aria-pressed={false} onClick={() => setView({ v: "assistant", id: null })}>
-            <span>
-              <span className="block text-lg font-semibold">Combine tools and information</span>
-              <span className="mt-1 block text-[15px] muted">
-                The all-rounder. It can run functions, answer questions from data, ask a document expert, read
-                files and use outside tools, and it decides which to use for each question.
-              </span>
-              <span className="mt-3 block text-[13px] faint">Good for: most things</span>
-            </span>
-          </button>
-          <button type="button" className="choice !p-6" aria-pressed={false} onClick={() => setView({ v: "docs", id: null })}>
-            <span>
-              <span className="block text-lg font-semibold">Answer questions from your documents</span>
-              <span className="mt-1 block text-[15px] muted">
-                Point it at folders of PDFs, Word files and presentations. People ask questions and get answers
-                taken from those documents.
-              </span>
-              <span className="mt-3 block text-[13px] faint">Good for: policies, manuals, contracts and reports</span>
-            </span>
-          </button>
-          <button type="button" className="choice !p-6" aria-pressed={false} onClick={() => setView({ v: "genie", id: null })}>
-            <span>
-              <span className="block text-lg font-semibold">Answer questions from your data</span>
-              <span className="mt-1 block text-[15px] muted">
-                People ask questions about your tables in plain English and get answers back. You choose the tables
-                and give it a few example questions.
-              </span>
-              <span className="mt-3 block text-[13px] faint">Good for: sales, finance and operations numbers</span>
-            </span>
-          </button>
-          <button
-            type="button"
-            className="choice !p-6"
-            aria-pressed={false}
-            disabled={apps !== null && !apps.enabled}
-            onClick={() => setView({ v: "app", agent: null })}
-          >
-            <span>
-              <span className="block text-lg font-semibold">Add an agent built in code</span>
-              <span className="mt-1 block text-[15px] muted">
-                Your developers wrote an agent and run it as an app in Databricks. Add it here so people can chat with it
-                like any other assistant.
-              </span>
-              <span className="mt-3 block text-[13px] faint">
-                {apps !== null && !apps.enabled ? apps.reason : "Good for: agents your team already built in code"}
-              </span>
-            </span>
-          </button>
-          {dev ? (
-            <button
-              type="button"
-              className="choice !p-6"
-              aria-pressed={false}
-              disabled={apps !== null && !apps.enabled}
-              onClick={() => setView({ v: "write" })}
-            >
-              <span>
-                <span className="block text-lg font-semibold">Write an agent&apos;s code with AI</span>
-                <span className="mt-1 block text-[15px] muted">
-                  Say what it should do. AI writes the code, you read and approve every line, and the portal deploys and tests it.
-                </span>
-                <span className="mt-3 block text-[13px] faint">Developer mode</span>
-              </span>
-            </button>
-          ) : null}
-          {dev ? (
-            <button
-              type="button"
-              className="choice !p-6"
-              aria-pressed={false}
-              disabled={apps !== null && !apps.enabled}
-              onClick={() => setView({ v: "upload" })}
-            >
-              <span>
-                <span className="block text-lg font-semibold">Upload an agent&apos;s code</span>
-                <span className="mt-1 block text-[15px] muted">
-                  Upload a project as a ZIP, for example one you exported here and changed. The portal deploys it as an app and
-                  offers it as an assistant.
-                </span>
-                <span className="mt-3 block text-[13px] faint">Developer mode</span>
-              </span>
-            </button>
-          ) : null}
-        </div>
+            ) : undefined
+          }
+        />
       </div>
     );
   }
+
 
   if (done) {
     return (

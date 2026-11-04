@@ -151,6 +151,19 @@ export type DesignerDraft = {
   pending_tools?: { job: string; slug: string; name: string; description: string }[];
   /** Credentials the designer asked the admin to connect (names and words only). */
   connections?: DesignerConnection[];
+  /** The plan: the steps it follows, in the admin's words (approved before anything is built). */
+  process?: string[];
+  /** Anything still unclear; building is refused while any remain. */
+  open_questions?: string[];
+};
+
+/** One file of the draft, for the side panel (made from the draft; nothing is stored or run). */
+export type DraftFile = {
+  path: string;
+  kind: "plan" | "instructions" | "tests" | "tool" | "removed";
+  text: string;
+  change: "new" | "changed" | "same" | "removed";
+  diff: string[];
 };
 /** What was shown for a message; `looked` is only for display and is never sent back. */
 /** A file attached while designing (display only; the message text names its path for the model). */
@@ -842,6 +855,18 @@ export const api = {
     send<{ agent_id: string; acted_as: string; warnings: string[]; deploying: string[] }>("PUT", `/api/admin/builder/agents/${id}`, spec),
   builderDelete: (id: string) => send<{ deleted: string }>("DELETE", `/api/admin/builder/agents/${id}`),
   designerStatus: () => request<DesignerInfo>("/api/admin/designer/status"),
+  designerDraftFiles: (draft: DesignerDraft, previous?: DesignerDraft) =>
+    request<{ files: DraftFile[] }>("/api/admin/designer/draft-files", previous ? { draft, previous } : { draft }),
+  /** All of the draft's files as one ZIP (a Blob to save). */
+  designerDraftZip: async (draft: DesignerDraft): Promise<Blob> => {
+    const res = await fetch("/api/admin/designer/draft-files/zip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draft }),
+    });
+    if (!res.ok) throw new Error(`The download failed (${res.status})`);
+    return res.blob();
+  },
   designerTurn: (messages: DesignerMessage[], draft: DesignerDraft, models: Partial<DesignerModels> = {}) =>
     request<DesignerTurn>("/api/admin/designer/turn", {
       // only what the interview needs: no display-only fields

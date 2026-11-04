@@ -38,6 +38,7 @@ import custom_agents
 import safety
 import dashboard
 import designer
+import designer_files
 import designer_models
 import events
 import files as filestore
@@ -1453,6 +1454,27 @@ def designer_turn(payload: dict = Body(...), x_forwarded_access_token: str = Hea
     who, tok = _require_admin(x_forwarded_access_token)
     return designer.turn(payload.get("messages") or [], payload.get("draft") or {}, tok, payload.get("models"),
                          owner=who.get("user_name") or "")
+
+
+@app.post("/api/admin/designer/draft-files")
+def designer_draft_files(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """The side panel's Plan, Files and Changes: the draft as readable files, marked against the previous
+    turn's draft. Made from what the browser sends; nothing is stored, no model is asked, nothing is run."""
+    who, _ = _require_admin(x_forwarded_access_token)
+    admin = who.get("user_name") or ""
+    cur = designer_files.files(designer.clean_draft(payload.get("draft") or {}), admin)
+    prev = designer_files.files(designer.clean_draft(payload["previous"]), admin) if isinstance(payload.get("previous"), dict) else []
+    return {"files": designer_files.with_changes(cur, prev)}
+
+
+@app.post("/api/admin/designer/draft-files/zip")
+def designer_draft_zip(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """All of the draft's files in one ZIP, to keep or share."""
+    who, _ = _require_admin(x_forwarded_access_token)
+    d = designer.clean_draft(payload.get("draft") or {})
+    body = designer_files.zip_of(designer_files.files(d, who.get("user_name") or ""), d.get("display_name") or "assistant")
+    name = "".join(c if c.isalnum() or c in "-_" else "-" for c in (d.get("display_name") or "assistant")).strip("-") or "assistant"
+    return Response(body, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="%s.zip"' % name})
 
 
 @app.get("/api/admin/designer/jobs/{job_id}")

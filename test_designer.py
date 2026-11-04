@@ -453,7 +453,7 @@ def _():
 
 @case("an assistant with tools is not ready until its tools were checked against the request")
 def _():
-    base = {"kind": "supervisor", "display_name": "Planner", "description": "Plans.", "access_decided": True,
+    base = {"kind": "supervisor", "display_name": "Planner", "description": "Plans.", "access_decided": True, "process": PLAN,
             "instructions": "x" * 60, "tools": [{"type": "volume", "ref": "main.a.files", "description": "Reads files."}]}
     assert any("coverage" in p for p in designer.check(base))
     ok = {**base, "coverage": [{"need": "read rate cards from Excel", "status": "partly", "by": "folder tool", "note": "Excel is untested."}]}
@@ -618,8 +618,11 @@ def block(code):
     return reply(text="Here you go:\n```python\n" + code + "```")
 
 
+PLAN = ["Ask for the amount and the currency.", "Convert it and say which rate was used."]
+
+
 def designed():
-    return {**GENIE, "kind": "supervisor", "instructions": "x" * 60, "warehouse_id": "wh123456",
+    return {**GENIE, "kind": "supervisor", "instructions": "x" * 60, "warehouse_id": "wh123456", "process": PLAN,
             "tools": [], "coverage": [{"need": "convert money", "status": "covered", "by": "new function"}]}
 
 
@@ -894,11 +897,13 @@ def _():
     def labels(d):
         return [(p["label"], p["done"]) for p in designer.progress(designer.clean_draft(d))]
 
-    assert labels({}) == [("What it is for", False), ("What it uses", False), ("How it should behave", False), ("Who can use it", False)]
+    assert labels({}) == [("What it is for", False), ("What it uses", False), ("How it should behave", False), ("Who can use it", False),
+                          ("The plan, with no open questions", False)]
     assert labels(GENIE) == [("What it is for", True), ("Which data it uses", True), ("Example questions", True), ("Who can use it", True)]
     ka = {"kind": "knowledge", "display_name": "Policies", "description": "HR policies",
           "sources": [{"volume": "main.hr.docs", "subfolder": "", "name": "docs", "description": "HR documents"}]}
-    assert labels(ka) == [("What it is for", True), ("Which documents it uses", True), ("Who can use it", False)]
+    assert labels(ka) == [("What it is for", True), ("Which documents it uses", True), ("Who can use it", False),
+                          ("The plan, with no open questions", False)]
     d = designed()
     d.update(tools=[{"type": "volume", "ref": "main.a.files", "description": "Files."}], coverage=[])
     assert ("Checked against what you asked", False) in labels(d)
@@ -907,6 +912,60 @@ def _():
     # nothing the admin sees may sound like a message to the model
     every = " ".join(p["label"] for p in designer.progress(designer.clean_draft(d)))
     assert "coverage" not in every and "describe_" not in every
+
+
+@case("the plan: steps in the admin's words; an open question blocks building until it is answered")
+def _():
+    d = {**designed(), "tools": [{"type": "volume", "ref": "main.a.files", "description": "Files."}],
+         "coverage": [{"need": "x", "status": "covered", "by": "t"}], "new_tools": []}
+    d.pop("new_tools")
+    assert designer.check(d) == [], designer.check(d)
+    assert any("Write the plan" in p for p in designer.check({**d, "process": ["Only one step"]}))
+    asked = designer.check({**d, "open_questions": ["Should totals include tax?"]})
+    assert asked == ["Open question, ask the admin and remove it from open_questions once answered: Should totals include tax?"]
+    assert ("The plan, with no open questions", False) in [(p["label"], p["done"]) for p in designer.progress(
+        designer.clean_draft({**d, "open_questions": ["Tax?"]}))]
+    assert designer.check(GENIE) == []  # a data assistant has example questions instead of a written plan
+    text = designer._prompt()
+    assert "open_questions" in text and "This is how I understood it" in text
+
+
+@case("the side panel's files: the plan, instructions and a new tool exactly as deployed; changes since the last turn; a ZIP")
+def _():
+    import io
+    import zipfile
+
+    portal, c = client(admin=True)
+    install(Model())
+    d = {**designed(), "display_name": "Money Helper", "description": "Converts money.",
+         "open_questions": ["Which rate source?"], "access": [{"kind": "group", "principal": "finance"}], "access_decided": True}
+    r = c.post("/api/admin/designer/draft-files", headers=H, json={"draft": d})
+    assert r.status_code == 200
+    files = {f["path"]: f for f in r.json()["files"]}
+    plan = files["plan.md"]["text"]
+    assert plan.startswith("# Money Helper") and "1. Ask for the amount and the currency." in plan
+    assert "## Open questions" in plan and "Which rate source?" in plan and "finance (team)" in plan
+    assert files["instructions.md"]["text"] == "x" * 60 and all(f["change"] == "same" for f in files.values())
+    d2 = {**d, "process": PLAN + ["Round to two decimals."], "open_questions": []}
+    out = c.post("/api/admin/designer/draft-files", headers=H, json={"draft": d2, "previous": d}).json()["files"]
+    plan2 = next(f for f in out if f["path"] == "plan.md")
+    assert plan2["change"] == "changed" and any(l.startswith("+3. Round to two decimals.") for l in plan2["diff"])
+    assert "None. Everything needed" in plan2["text"]
+    z = c.post("/api/admin/designer/draft-files/zip", headers=H, json={"draft": d2})
+    assert z.status_code == 200 and "Money-Helper.zip" in z.headers["content-disposition"]
+    names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
+    assert "money-helper/plan.md" in names and "money-helper/instructions.md" in names
+    # a new tool's files are what would be deployed (assembled, never run)
+    tool = {"kind": "mcp", "slug": "rate-reader", "name": "Rate reader", "description": "Reads rates.",
+            "abilities": [{"name": "read_rates", "description": "Read rates.", "changes_data": False}],
+            "code": 'def read_rates(sheet: str) -> dict:\n    """Read the rates."""\n    return {"sheet": sheet}\n'}
+    out = c.post("/api/admin/designer/draft-files", headers=H, json={"draft": {**d2, "new_tools": [tool]}}).json()["files"]
+    paths = [f["path"] for f in out]
+    assert "tools/rate-reader/server.py" in paths and "tools/rate-reader/requirements.txt" in paths and "tools/rate-reader/mcp.yaml" in paths
+    server = next(f for f in out if f["path"] == "tools/rate-reader/server.py")["text"]
+    assert "def read_rates" in server and "FastMCP" in server
+    _, outsider = client(admin=False)
+    assert outsider.post("/api/admin/designer/draft-files", headers=H, json={"draft": d}).status_code == 403
 
 
 @case("each turn says, in plain words, what it looked at, and returns the checklist")
@@ -920,7 +979,7 @@ def _():
     out = designer.turn([{"role": "user", "content": "hi"}], {}, "T")
     assert out["looked"] == ["your tables", "your SQL warehouses"]  # "your tables" once, not twice
     assert out["progress"][0] == {"key": "purpose", "label": "What it is for", "done": False}
-    assert designer.progress({})[-1]["key"] == "access"
+    assert designer.progress({})[-1]["key"] == "plan" and designer.progress(GENIE)[-1]["key"] == "access"  # a data assistant has no written plan
 
 
 @case("the status route offers this admin's models and defaults; turn, test-plan and test-run pass the choice on")

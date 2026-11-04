@@ -253,6 +253,9 @@ def clean_draft(raw) -> dict:
     strings("tables", 50, 200)
     strings("sample_questions", 20, 300)
     strings("gaps", 10, 300)
+    # The plan (designer_files.plan): the steps it follows in the admin's words, and anything still unclear.
+    strings("process", 20, 400)
+    strings("open_questions", 10, 300)
 
     def rows(key, fields, n):
         v = raw.get(key)
@@ -404,6 +407,11 @@ def check(d: dict) -> list[str]:
     problems += _connection_problems(d)
     for p in d.get("pending_tools") or []:
         problems.append("The new tool %s is still being written. Wait until it is ready; do not propose yet." % p["name"])
+    if kind != "genie" and len(d.get("process") or []) < 2:
+        problems.append("Write the plan in process: the steps it follows, in order, in the admin's words. Then read it back to "
+                        "the admin and ask whether that is how they work.")
+    for q in d.get("open_questions") or []:
+        problems.append("Open question, ask the admin and remove it from open_questions once answered: " + q)
     return problems
 
 
@@ -485,6 +493,8 @@ def progress(d: dict) -> list[dict]:
     if _needed_secrets(d):
         items.append(("connect", "Connections set up", not _connection_problems(d)))
     items.append(("access", "Who can use it", bool(d.get("access_decided"))))
+    if kind != "genie":
+        items.append(("plan", "The plan, with no open questions", len(d.get("process") or []) >= 2 and not d.get("open_questions")))
     return [{"key": k, "label": label, "done": bool(ok)} for k, label, ok in items]
 
 
@@ -822,6 +832,12 @@ _DRAFT_PROPS = {
     "access_decided": {"type": "boolean", "description": "True once the admin has said who can use it, even if nobody."},
     "chat": {"type": "boolean", "description": "genie only: also make a chat version people can use here. Default true."},
     "gaps": {"type": "array", "items": _S, "description": "Things asked for that cannot be built with what exists."},
+    "process": {"type": "array", "items": _S, "description": "The plan: the steps the assistant follows, in order, in the admin's own "
+                                                         "words (one plain sentence each, e.g. 'Ask for the budget and dates'). The "
+                                                         "admin reads and approves this plan before anything is built."},
+    "open_questions": {"type": "array", "items": _S, "description": "Anything you are unsure about or assumed. Keep it current: add a "
+                                                                "question when something is unclear, remove it once the admin "
+                                                                "answers. Building is refused while any remain."},
     "coverage": {"type": "array", "description": "One row per specific thing the admin asked it to do or use, checked against what the tools really do.", "items": _schema({
         "need": {"type": "string", "description": "What was asked, in the admin's words."},
         "status": {"type": "string", "enum": list(COVERAGE)},

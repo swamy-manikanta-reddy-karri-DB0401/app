@@ -5,28 +5,41 @@ import { api } from "@/lib/api";
 import type { DesignerModel, DesignerRules } from "@/lib/api";
 import { ErrorBox, Select, Spinner } from "../bits";
 import { Dialog } from "../deployer/parts";
-import { PlusIcon, ShieldIcon, TrashIcon } from "../icons";
+import { PlusIcon, SlidersIcon, TrashIcon } from "../icons";
 
 /** Admins decide what the assistant designer may be used for and may build (designer_guard.py): every
  *  message is checked against these before the designer's AI sees it, and every plan before it is built. */
-export function DesignerRulesButton({ models }: { models: DesignerModel[] }) {
+/** The Build page's Settings: Developer mode and the rules for the assistant designer. */
+export function BuildSettingsButton({ models, onSaved }: { models: DesignerModel[]; onSaved?: () => void }) {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button
-        type="button"
-        className="text-[13px] font-medium underline"
-        style={{ color: "var(--brand-deep)" }}
-        onClick={() => setOpen(true)}
-      >
-        <span className="inline-flex items-center gap-1">
-          <ShieldIcon size={13} /> Rules for the designer
-        </span>
+      <button type="button" className="btn btn-quiet shrink-0" onClick={() => setOpen(true)}>
+        <SlidersIcon size={16} /> Settings
       </button>
       {open ? (
-        <RulesDialog models={models} onClose={() => setOpen(false)} />
+        <RulesDialog
+          models={models}
+          onClose={() => setOpen(false)}
+          onSaved={() => {
+            setOpen(false);
+            onSaved?.();
+          }}
+        />
       ) : null}
     </>
+  );
+}
+
+/** An on/off switch (the checkbox stays the real control, so keyboards and screen readers work as usual). */
+function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <span className="switch">
+      <input type="checkbox" role="switch" checked={on} aria-label={label} onChange={(e) => onChange(e.target.checked)} />
+      <span aria-hidden className="switch-track">
+        <span className="switch-knob" />
+      </span>
+    </span>
   );
 }
 
@@ -36,9 +49,11 @@ const num = (v: string, hi: number) =>
 function RulesDialog({
   models,
   onClose,
+  onSaved,
 }: {
   models: DesignerModel[];
   onClose: () => void;
+  onSaved: () => void;
 }) {
   const [r, setR] = useState<DesignerRules | null>(null);
   const [canSave, setCanSave] = useState(true);
@@ -66,7 +81,7 @@ function RulesDialog({
         rules: r.rules.filter((x) => x.trim()),
       });
       setR(o.rules);
-      onClose();
+      onSaved();
     } catch (e: any) {
       setErr(e.message);
     } finally {
@@ -97,8 +112,8 @@ function RulesDialog({
 
   return (
     <Dialog
-      title="Rules for the assistant designer"
-      sub="The designer only helps design and fix assistants and tools. Every message is checked before its AI sees it, and every plan before it is built."
+      title="Build settings"
+      sub="For every admin who builds assistants here."
       onClose={onClose}
       footer={
         <>
@@ -111,7 +126,7 @@ function RulesDialog({
             disabled={busy || !r || !canSave}
             onClick={save}
           >
-            {busy ? "Saving…" : "Save rules"}
+            {busy ? "Saving…" : "Save settings"}
           </button>
         </>
       }
@@ -124,9 +139,34 @@ function RulesDialog({
         </p>
       ) : null}
       {!r ? (
-        <Spinner label="Loading the rules…" />
+        <Spinner label="Loading the settings…" />
       ) : (
         <div className="space-y-6">
+          <section className="rounded-xl border p-4" style={{ borderColor: "var(--line)" }}>
+            <label className="flex cursor-pointer items-start justify-between gap-4">
+              <span>
+                <span className="block text-[15px] font-semibold">Developer mode</span>
+                <span className="mt-0.5 block text-[13px] muted">
+                  For admins who write code: edit a tool&apos;s code by hand, export a custom agent as code, and upload an
+                  agent&apos;s code. Off keeps code out of sight.
+                </span>
+              </span>
+              <Switch
+                label="Developer mode"
+                on={!!r.developer_group}
+                onChange={(v) => set({ developer_group: v ? "admins" : "" })}
+              />
+            </label>
+          </section>
+
+          <div>
+            <h3 className="text-[16px] font-semibold">Assistant designer</h3>
+            <p className="mt-0.5 text-[13px] muted">
+              It only helps design and fix assistants and tools. Every message is checked before its AI sees it, and every plan
+              before it is built.
+            </p>
+          </div>
+
           <section>
             <p className="label">Your own rules</p>
             <p className="help !mt-0">
@@ -325,22 +365,6 @@ function RulesDialog({
               <span className="help">
                 One short check per typed message (a second or two). Clicking
                 one of the designer's own answers is not checked.
-              </span>
-            </label>
-            <label className="block sm:col-span-2">
-              <span className="text-[13px] font-medium muted">
-                Developers (Developer mode)
-              </span>
-              <input
-                className="field mt-1"
-                value={r.developer_group}
-                maxLength={128}
-                placeholder="No one"
-                onChange={(e) => set({ developer_group: e.target.value })}
-              />
-              <span className="help">
-                Admins in this team can edit a tool&apos;s code and export
-                agents as code. Leave empty to keep code out of sight.
               </span>
             </label>
           </section>

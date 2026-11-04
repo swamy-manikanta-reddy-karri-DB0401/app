@@ -67,6 +67,14 @@ def _():
     assert "Other custom agent" in f["README.md"] and "_not_exported" not in cfg
     assert json.loads(f["tests/conversations.json"]) == [{"question": "Plan for 50k", "then": ["May"], "expect": "Asks for dates"}]
     assert "audience" not in cfg and "policy" not in cfg  # who may use it and the portal's policy stay in the portal
+    # tool addresses are written in, because a person's token inside an app cannot look apps up (no "apps" scope)
+    data, name = ax.build(REC, "mlflow", {"mcp-gam-mock": "https://gam.example.com", "other-app": "https://x"})
+    z = zipfile.ZipFile(io.BytesIO(data))
+    cfg2 = json.loads(z.read(name[:-4] + "/agent/config.json"))
+    assert cfg2["tool_urls"] == {"mcp-gam-mock": "https://gam.example.com"}, cfg2["tool_urls"]
+    assert "tool_urls" in f["agent/tools.py"] and "left out" in f["agent/tools.py"]
+    assert "async def invocations" not in f["app.py"] and "def invocations" in f["app.py"]  # tool calls need no running loop
+    assert "OauthCredentialsStrategy" in f["agent/tools.py"] and 'auth_type="pat"' not in f["agent/tools.py"]
 
 
 @case("security travels with it: runs as the person, changing tools need ALLOW_CHANGES, results are data, no secrets")
@@ -75,8 +83,10 @@ def _():
     assert "x-forwarded-access-token" in f["app.py"].lower() and "PERSON_TOKEN" in f["agent/tools.py"]
     assert "ALLOW_CHANGES" in f["agent/tools.py"] and "not_run" in f["agent/tools.py"]
     blob = json.dumps(f).lower()
-    for secret in ("dapi", "client_secret", "password", "bearer "):
+    for secret in ("dapi", "client_secret", "password"):
         assert secret not in blob, secret
+    import re
+    assert not re.search(r"bearer [a-z0-9._-]{20,}", blob), "a token written into the code"
     _, m = files_of("mlflow")
     assert '"untrusted_data"' in m["agent/agent.py"]
 

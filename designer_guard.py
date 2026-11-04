@@ -39,7 +39,7 @@ HOST_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-
 GROUP_RE = re.compile(r"^[\w .@+-]{1,128}$")
 DEFAULTS = {
     "group": "admins",           # who may use the designer
-    "developer_group": "",       # who gets Developer mode (edit tool code, export agents as code); "" = nobody
+    "developer_group": "",       # Developer mode (edit tool code, export or upload agents as code): "admins" = on (the switch), "" = off
     "checker": "",               # "" = the designer's own chat model
     "rules": [],                 # plain words, e.g. "Never build tools that email people outside the company"
     "allow_new_tools": True,

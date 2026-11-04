@@ -600,6 +600,9 @@ def start(slug: str, who: dict, user_tok: str, entry: dict | None = None) -> dic
         raise DbxError(NOT_CONNECTED % ", ".join(missing), 409)
     if app is None:
         body = {"name": name, "description": entry["description"][:500]}
+        if entry.get("user_api_scopes"):
+            # On the app before its compute first starts: Databricks mints people's tokens from the scopes it booted with.
+            body["user_api_scopes"] = list(entry["user_api_scopes"])
         if _resources(entry):
             body["resources"] = _resources(entry)
         app, by = act("POST", "/api/2.0/apps", user_tok, json=body)
@@ -690,7 +693,7 @@ def run(entry: dict, user_tok: str, files: list | None = None) -> None:
     """Background: download the source (or take `files` already in hand, for a tool
     that is not in the catalog), copy it into the workspace, deploy it."""
     name, slug = entry["app_name"], entry["slug"]
-    base = SOURCE_ROOT + "/" + slug
+    base = (entry.get("source_root") or SOURCE_ROOT) + "/" + slug
     try:
         files = files if files is not None else _files(_archive(), slug)
         log.info("MCP %s: copying %d files to %s", slug, len(files), base)

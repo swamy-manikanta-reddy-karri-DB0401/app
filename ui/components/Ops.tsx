@@ -362,6 +362,8 @@ function sentence(e: PortalEvent): ReactNode {
       return <>{name} retired {b(label)}</>;
     case "designer_refused":
       return <>The assistant designer refused a message from {name}: {d.why === "against_rule" ? "against your rules for the designer" : "not about building assistants or tools"}</>;
+    case "uploaded_agent":
+      return <>{name} {d.new ? "deployed" : "deployed a new version of"} {b(label)} from code ({d.files ?? "?"} files)</>;
     case "exported_agent":
       return <>{name} exported {b(label)} as code ({d.framework === "langgraph" ? "LangGraph" : "MLflow"})</>;
     case "forgot_memory":

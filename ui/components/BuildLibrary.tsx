@@ -86,7 +86,7 @@ const TONE: Record<Tone, React.CSSProperties> = {
 
 type Tab = "all" | Kind;
 
-export function BuildLibrary({ groups, onCreate, onTry }: { groups: LibGroup[]; onCreate: () => void; onTry?: (key: string) => void }) {
+export function BuildLibrary({ groups, onCreate, onTry, actions }: { groups: LibGroup[]; onCreate: () => void; onTry?: (key: string) => void; actions?: ReactNode }) {
   const [tab, setTab] = useState<Tab>("all");
   const [q, setQ] = useState("");
 
@@ -128,10 +128,13 @@ export function BuildLibrary({ groups, onCreate, onTry }: { groups: LibGroup[]; 
           <h1 className="text-[28px] font-semibold leading-tight tracking-[-0.02em]">Build</h1>
           <p className="mt-1 text-[15px] muted">Create assistants, and change, test or share the ones you have.</p>
         </div>
-        <button type="button" className="btn btn-primary shrink-0" onClick={onCreate}>
-          <PlusIcon size={16} />
-          Create assistant
-        </button>
+        <div className="flex flex-wrap gap-2">
+          {actions}
+          <button type="button" className="btn btn-primary shrink-0" onClick={onCreate}>
+            <PlusIcon size={16} />
+            Create assistant
+          </button>
+        </div>
       </div>
 
       <div className="mb-4 flex gap-1 overflow-x-auto border-b" style={{ borderColor: "var(--line)" }} role="tablist" aria-label="Kinds of assistant">

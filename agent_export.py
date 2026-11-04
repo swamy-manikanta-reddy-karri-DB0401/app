@@ -42,6 +42,7 @@ signs in with it. Run locally, the Databricks CLI profile in DATABRICKS_CONFIG_P
 import contextvars
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -54,13 +55,31 @@ PERSON_TOKEN: contextvars.ContextVar = contextvars.ContextVar("person_token", de
 ALLOW_CHANGES = os.environ.get("ALLOW_CHANGES", "") == "1"   # tools that change something are not run otherwise
 
 
+IN_APP = bool(os.environ.get("DATABRICKS_APP_NAME"))   # set by Databricks Apps
+
+
+def _person(tok: str):
+    """The person's token as an OAuth credential. It is one (Databricks Apps forwards an OAuth token), and
+    databricks-mcp refuses to call a tool app from a client set up as a personal access token (seen live: "OAuth
+    authentication is required for MCP servers hosted on Databricks Apps")."""
+    from databricks.sdk.credentials_provider import OAuthCredentialsProvider, OauthCredentialsStrategy
+    from databricks.sdk.oauth import Token
+
+    return OauthCredentialsStrategy("person-token", lambda cfg: OAuthCredentialsProvider(
+        lambda: {"Authorization": "Bearer " + tok}, lambda: Token(access_token=tok, token_type="Bearer")))
+
+
 def client() -> WorkspaceClient:
     tok = PERSON_TOKEN.get()
     if tok:
         host = os.environ.get("DATABRICKS_HOST", "")
         host = host if host.startswith("http") else "https://" + host
-        return WorkspaceClient(host=host, token=tok, auth_type="pat")
-    return WorkspaceClient()
+        return WorkspaceClient(host=host, credentials_strategy=_person(tok))
+    if IN_APP:
+        # Never fall back to the app's own identity for a person's question (the portal refuses the same way).
+        raise PermissionError("No signed-in person's token reached the app. Turn on user authorization for this app "
+                              "(user API scopes) and restart it.")
+    return WorkspaceClient()   # on your machine: your Databricks CLI profile
 
 
 # ---------------------------------------------------------------- documents
@@ -125,12 +144,22 @@ def search_documents(query: str) -> dict:
 def _mcp(app: str):
     from databricks_mcp import DatabricksMCPClient
     w = client()
-    return DatabricksMCPClient(server_url=w.apps.get(app).url.rstrip("/") + "/mcp", workspace_client=w)
+    # The address is written in config.json when exported: looking it up needs the "apps" scope, which a person's
+    # token inside an app does not have (seen live: 403 "Invalid scope, required scopes: apps").
+    url = (CONFIG.get("tool_urls") or {}).get(app) or w.apps.get(app).url
+    return DatabricksMCPClient(server_url=url.rstrip("/") + "/mcp", workspace_client=w)
 
 
 def mcp_tools() -> list:
-    """[{app, name, description, schema, read_only}] for every tool app the agent uses."""
-    return [t for app in CONFIG["tools"] for t in mcp_tools_of(app)]
+    """[{app, name, description, schema, read_only}] for every tool app the agent uses. A tool app that cannot be
+    reached is left out (and logged), so the agent still answers with the rest."""
+    out = []
+    for app in CONFIG["tools"]:
+        try:
+            out.extend(mcp_tools_of(app))
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger("agent.tools").warning("tool app %s left out: %s", app, str(exc)[:300])
+    return out
 
 
 @lru_cache(maxsize=None)
@@ -396,7 +425,7 @@ APP_PY = r'''"""Serves the agent as a Databricks App: POST /invocations with a R
 The person's own sign-in (X-Forwarded-Access-Token, added by the Databricks Apps proxy) is used for every call,
 so they only reach what they are allowed to. The portal's "Add an agent built in code" calls this address.
 """
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException
 from mlflow.types.responses import ResponsesAgentRequest
 
 from agent import tools
@@ -410,9 +439,10 @@ def health():
     return {"ok": True, "agent": tools.CONFIG["name"]}
 
 
+# A plain (not async) handler on purpose: FastAPI runs it in a worker thread with no event loop, which the tool
+# calls need (databricks-mcp starts its own; seen live: "asyncio.run() cannot be called from a running event loop").
 @app.post("/invocations")
-async def invocations(request: Request, x_forwarded_access_token: str = Header(None)):
-    body = await request.json()
+def invocations(body: dict = Body(...), x_forwarded_access_token: str = Header(None)):
     if not isinstance(body.get("input"), list):
         raise HTTPException(400, 'Send {"input": [{"role": "user", "content": "..."}]}')
     tools.PERSON_TOKEN.set(x_forwarded_access_token or "")
@@ -452,7 +482,7 @@ for n, t in enumerate(tests, 1):
 '''
 
 
-def config_of(rec: dict) -> dict:
+def config_of(rec: dict, tool_urls: dict | None = None) -> dict:
     s = rec["spec"]
     assistants, skipped = [], []
     for a in s.get("assistants") or []:
@@ -464,7 +494,9 @@ def config_of(rec: dict) -> dict:
         "name": s["name"], "description": s["description"], "model": s["model"],
         "instructions": s.get("instructions") or "", "runbook": (s.get("runbook") or {}).get("text") or "",
         "rules": s.get("rules") or [], "documents": s.get("documents") or [],
-        "tools": [t["app"] for t in s.get("tools") or []], "data": s.get("data") or [], "assistants": assistants,
+        "tools": [t["app"] for t in s.get("tools") or []],
+        "tool_urls": {t["app"]: (tool_urls or {})[t["app"]] for t in s.get("tools") or [] if (tool_urls or {}).get(t["app"])},
+        "data": s.get("data") or [], "assistants": assistants,
         "limits": s.get("limits") or {"steps": 10, "reply_tokens": 4000},
         "exported_from": {"agent_id": rec["agent_id"], "version": rec["version"]},
         "_not_exported": {"assistants": skipped},
@@ -532,11 +564,12 @@ code**, choose `{slug}`, and it is offered to them like any other assistant.
 """
 
 
-def build(rec: dict, framework: str) -> tuple[bytes, str]:
-    """(zip bytes, file name) of the project for this version."""
+def build(rec: dict, framework: str, tool_urls: dict | None = None) -> tuple[bytes, str]:
+    """(zip bytes, file name) of the project for this version. tool_urls: each tool app's address, read by the
+    portal at export, so the exported agent never needs to look apps up."""
     if framework not in FRAMEWORKS:
         raise ValueError("framework must be mlflow or langgraph")
-    cfg = config_of(rec)
+    cfg = config_of(rec, tool_urls)
     slug = _slug(cfg["name"])
     tests = [{"question": t["question"], "then": t.get("then") or [], "expect": t.get("expect") or ""} for t in rec["spec"].get("tests") or []]
     files = {

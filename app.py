@@ -31,6 +31,7 @@ import attachments
 import audit
 import builder
 import chat
+import code_upload
 import genie
 import knowledge
 import chats
@@ -1526,16 +1527,49 @@ def _require_developer(forwarded):
 def custom_export(agent_id: str, payload: dict = Body(default={}), x_forwarded_access_token: str = Header(None)):
     """A custom agent as a code project the developer owns (agent_export.py): MLflow ResponsesAgent or LangGraph.
     Built from the latest version's settings; nothing secret is in it."""
-    who, _ = _require_developer(x_forwarded_access_token)
+    who, tok = _require_developer(x_forwarded_access_token)
     _custom_or_404(agent_id)
     framework = str((payload or {}).get("framework") or "mlflow")
     if framework not in agent_export.FRAMEWORKS:
         raise HTTPException(400, "Choose mlflow or langgraph.")
     rec = custom_agents.latest(agent_id)
-    data, name = agent_export.build(rec, framework)
+    urls = {}
+    if rec["spec"].get("tools"):
+        try:
+            apps, _ = mcps._apps(tok)
+            urls = {n: a.get("url") for n, a in apps.items() if a.get("url")}
+        except DbxError as exc:
+            log.warning("export: could not read the tool apps' addresses: %s", exc)
+    data, name = agent_export.build(rec, framework, urls)
     events.note(action="exported_agent", target=custom_agents.key(agent_id), label=rec["spec"]["name"],
                 detail={"framework": framework, "version": rec["version"]})
     return Response(data, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="%s"' % name})
+
+
+@app.post("/api/admin/code-agents/upload")
+async def code_agent_upload(
+    file: UploadFile = File(...),
+    display_name: str = Form(...),
+    description: str = Form(""),
+    app_name: str = Form(""),
+    x_forwarded_access_token: str = Header(None),
+):
+    """Developer mode: deploy an uploaded project as a Databricks App and offer it as an assistant (code_upload.py).
+    The portal checks the files and never runs them."""
+    who, tok = _require_developer(x_forwarded_access_token)
+    blob = await file.read()
+    if len(blob) > code_upload.MAX_BYTES * 2:
+        raise HTTPException(413, "The ZIP is too big.")
+    out = code_upload.start(blob, display_name, description, app_name.strip(), who, tok)
+    events.note(action="uploaded_agent", target="app:" + out["app_name"], label=display_name,
+                detail={"files": out["files"], "new": out["new"]})
+    return out
+
+
+@app.get("/api/admin/code-agents/jobs/{job_id}")
+def code_agent_job(job_id: str, x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_developer(x_forwarded_access_token)
+    return code_upload.job(job_id, who)
 
 
 @app.get("/api/admin/developer")

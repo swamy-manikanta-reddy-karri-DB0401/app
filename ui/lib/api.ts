@@ -945,6 +945,26 @@ export const api = {
     const m = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") || "");
     return { blob: await res.blob(), file: m ? m[1] : "agent.zip" };
   },
+  /** Developer mode: deploy a project ZIP as an app and offer it as an assistant. */
+  uploadCodeAgent: async (file: File, display_name: string, description: string, app_name: string) => {
+    const body = new FormData();
+    body.append("file", file);
+    body.append("display_name", display_name);
+    body.append("description", description);
+    body.append("app_name", app_name);
+    const res = await fetch("/api/admin/code-agents/upload", { method: "POST", body });
+    const text = await res.text();
+    let data: any = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { error: text.slice(0, 300) };
+    }
+    if (!res.ok) throw new Error(data.error || data.detail || `The upload failed (${res.status})`);
+    return data as { job: string; app_name: string; new: boolean; files: number };
+  },
+  codeAgentJob: (job: string) =>
+    request<{ state: string; step: string; app_name: string; note?: string; new?: boolean }>(`/api/admin/code-agents/jobs/${encodeURIComponent(job)}`),
   developerStatus: () => request<{ on: boolean; team: string }>("/api/admin/developer"),
   toolCode: (slug: string) =>
     request<{ slug: string; name: string; code: string; fingerprint: string }>(`/api/admin/designer/tool-code?slug=${encodeURIComponent(slug)}`),

@@ -1,6 +1,7 @@
 "use client";
 
-import { DesignerRulesButton } from "./designer/Rules";
+import { CodeUpload } from "./custom/CodeUpload";
+import { BuildSettingsButton } from "./designer/Rules";
 import { useEffect, useRef, useState } from "react";
 import { Agent, api, CustomSpec, CustomSummary, BuilderTool, DesignerInfo, FileSettings, McpEntry, SourceItem, ToolType } from "@/lib/api";
 import { ErrorBox, Select, Spinner, Tag, useLoad } from "./bits";
@@ -131,11 +132,21 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
     | { v: "docs"; id: string | null }
     | { v: "designer" }
     | { v: "app"; agent: Agent | null }
+    | { v: "upload" }
     | { v: "custom"; id: string | null; initial: CustomSpec | null }
     | { v: "customPage"; id: string; warnings?: string[] }
   >({ v: "home" });
   const [customs, setCustoms] = useState<{ enabled: boolean; reason?: string; agents: CustomSummary[] } | null>(null);
   const [customsErr, setCustomsErr] = useState("");
+  const [dev, setDev] = useState(false);
+  const loadDev = () =>
+    api
+      .developerStatus()
+      .then((d) => setDev(d.on))
+      .catch(() => setDev(false));
+  useEffect(() => {
+    loadDev();
+  }, []);
   const [apps, setApps] = useState<{ enabled: boolean; reason?: string; agents: Agent[] } | null>(null);
   const [appsErr, setAppsErr] = useState("");
   // The "describe it in your own words" beta: offered unless an operator switched it off. When it is
@@ -229,6 +240,9 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
       />
     );
   }
+  if (view.v === "upload") {
+    return <CodeUpload onCancel={() => setView({ v: "pick" })} onDone={() => { setView({ v: "home" }); }} />;
+  }
   if (view.v === "app") {
     return <AppAgentWizard editing={view.agent} onCancel={() => setView({ v: "home" })} onFinished={finished} />;
   }
@@ -295,7 +309,6 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
                     Describe your assistant <ArrowRightIcon size={16} />
                   </button>
                   {!designer.ready ? <p className="max-w-xs text-sm muted">{designer.reason}</p> : null}
-                  <DesignerRulesButton models={designer.models || []} />
                 </div>
               </div>
             </section>
@@ -374,6 +387,24 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
               </span>
             </span>
           </button>
+          {dev ? (
+            <button
+              type="button"
+              className="choice !p-6"
+              aria-pressed={false}
+              disabled={apps !== null && !apps.enabled}
+              onClick={() => setView({ v: "upload" })}
+            >
+              <span>
+                <span className="block text-lg font-semibold">Upload an agent&apos;s code</span>
+                <span className="mt-1 block text-[15px] muted">
+                  Upload a project as a ZIP, for example one you exported here and changed. The portal deploys it as an app and
+                  offers it as an assistant.
+                </span>
+                <span className="mt-3 block text-[13px] faint">Developer mode</span>
+              </span>
+            </button>
+          ) : null}
         </div>
       </div>
     );
@@ -512,7 +543,14 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
     },
   ];
 
-  return <BuildLibrary groups={groups} onCreate={() => setView({ v: "pick" })} onTry={onTry} />;
+  return (
+    <BuildLibrary
+      groups={groups}
+      onCreate={() => setView({ v: "pick" })}
+      onTry={onTry}
+      actions={<BuildSettingsButton models={designer?.models || []} onSaved={loadDev} />}
+    />
+  );
 }
 
 // ---------------------------------------------------------------------------

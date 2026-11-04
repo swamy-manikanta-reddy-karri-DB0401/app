@@ -7,6 +7,7 @@ import { chosen, loadChoice, modelDetail } from "@/lib/designerModels";
 import { ErrorBox, Select, Spinner } from "../bits";
 import { CheckIcon, DownloadIcon, PlusIcon, TrashIcon } from "../icons";
 import { CodeIDE, LiveWriting } from "./CodeWorkbench";
+import { BriefPanel } from "./CodeBrief";
 
 /** Developer mode: the AI writes an agent's code (code_agent.py). Describe it; the code model writes it into the
  *  project our export makes; the developer reads the diff and approves; it is deployed as an app and tested; a
@@ -71,6 +72,8 @@ export function CodeWriter({
   const [check, setCheck] = useState<CodeCheck | null>(null);
   const [checking, setChecking] = useState(false);
   const checkSeq = useRef(0);
+  const jobRef = useRef("");
+  const runRef = useRef<Promise<void> | null>(null);
   const alive = useRef(true);
   useEffect(
     () => () => {
@@ -80,12 +83,13 @@ export function CodeWriter({
   );
 
   const chat = models.filter((m) => m.tools !== false);
-  const picks = () => chosen({ ...loadChoice(models), ...(codeModel ? { code: codeModel } : {}) });
+  const picks = () => chosen({ ...(written?.models || {}), ...loadChoice(models), ...(codeModel ? { code: codeModel } : {}) });
   const set = (p: Partial<CodeSetup>) => setSetup((s) => ({ ...s, ...p }));
   const full = (): CodeSetup => ({ ...setup, write_folders: lines(folders), websites: lines(sites) });
 
   async function follow(job: string) {
     const t0 = Date.now();
+    jobRef.current = job;
     setRounds([]);
     setStarted(t0);
     while (alive.current && Date.now() - t0 < 20 * 60 * 1000) {
@@ -95,6 +99,7 @@ export function CodeWriter({
       setStep(j.step);
       setNotes(j.notes || []);
       setRounds(j.rounds || []);
+      if (j.state === "stopped") return;
       if (j.state === "failed") throw new Error(j.error || "The code could not be written.");
       if (j.state === "done" && j.result) {
         const r = j.result;
@@ -104,6 +109,7 @@ export function CodeWriter({
         if (r.tests.length) setTests(r.tests);
         setRead(false);
         setStage("review");
+        jobRef.current = "";
         return;
       }
     }
@@ -135,13 +141,18 @@ export function CodeWriter({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
 
-  async function writeIt() {
+  function run(p: Promise<void>) {
+    runRef.current = p;
+    return p;
+  }
+
+  async function writeIt(next?: CodeSetup) {
     setErr("");
     setBefore(null);
     setStage("writing");
     setStep("Starting");
     try {
-      const s = full();
+      const s = next || full();
       setSetup(s);
       await follow((await api.codeAgentWrite(s, picks())).job);
     } catch (e: any) {
@@ -150,18 +161,68 @@ export function CodeWriter({
     }
   }
 
-  async function changeIt(request: string, failures: CodeTestResult[] = []) {
+  async function changeIt(request: string, failures: CodeTestResult[] = [], on?: { setup: CodeSetup; code: Record<string, string>; briefBefore: string }) {
     if (!written) return;
     setErr("");
     setStage("writing");
     setStep("Making the change");
     try {
-      setBefore(code);
-      await follow((await api.codeAgentChange(setup, code, request, failures, picks())).job);
+      const s = on?.setup || setup;
+      const c = on?.code || code;
+      setBefore(c);
+      await follow((await api.codeAgentChange(s, c, request, failures, picks(), on?.briefBefore || "")).job);
       setChange("");
     } catch (e: any) {
       setErr(e.message);
       setStage("review");
+    }
+  }
+
+  async function applyBrief(next: CodeSetup) {
+    setErr("");
+    const old = setup;
+    if (stage === "writing" && jobRef.current) {
+      await api.codeAgentStop(jobRef.current).catch(() => undefined);
+      await runRef.current; // the writing ends at its next piece of text
+    }
+    setSetup(next);
+    if (!written) {
+      run(writeIt(next)); // nothing written yet: there is nothing to keep
+      return;
+    }
+    let cur = code; // a change that was stopped never replaced the code, so this is the code before it
+    const agentChanged = (check?.diff.find((d) => d.path === "agent/agent.py")?.state || "same") !== "same";
+    try {
+      if (next.framework !== old.framework && !agentChanged) {
+        const { ["agent/agent.py"]: _old, ...rest } = cur;
+        const c = await api.codeAgentCheck(next, rest);
+        cur = c.code || rest;
+        setCode(cur);
+        setCheck(c);
+      }
+    } catch (e: any) {
+      setErr(e.message);
+      return;
+    }
+    const taskChanged = next.task.trim() !== old.task.trim();
+    const port =
+      next.framework !== old.framework && agentChanged
+        ? `Move agent/agent.py to ${next.framework === "mlflow" ? "the MLflow ResponsesAgent" : "LangGraph"}, keeping what it does.`
+        : "";
+    if (taskChanged || port) {
+      run(changeIt(port, [], { setup: next, code: cur, briefBefore: taskChanged ? old.task : "" }));
+      return;
+    }
+    // nothing the code depends on changed: check it again (no AI), and it needs approving again
+    setStage("review");
+    setRead(false);
+    setChecking(true);
+    try {
+      setCheck(await api.codeAgentCheck(next, cur));
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setChecking(false);
     }
   }
 
@@ -364,7 +425,7 @@ export function CodeWriter({
             </div>
           </details>
           <div className="flex flex-wrap items-center gap-3">
-            <button type="button" className="btn btn-primary btn-lg" disabled={!ready} onClick={writeIt}>
+            <button type="button" className="btn btn-primary btn-lg" disabled={!ready} onClick={() => run(writeIt())}>
               Write the code
             </button>
             <span className="text-[13px] faint">Takes a minute or two. Each agent is one Databricks App (a workspace has 100).</span>
@@ -372,6 +433,18 @@ export function CodeWriter({
         </div>
       ) : null}
 
+      {stage !== "describe" ? (
+        <BriefPanel
+          setup={setup}
+          models={models}
+          customs={customs}
+          writing={stage === "writing"}
+          disabled={stage === "deploying" || testing}
+          hasCode={!!written}
+          agentChanged={(check?.diff.find((d) => d.path === "agent/agent.py")?.state || "same") !== "same"}
+          onApply={applyBrief}
+        />
+      ) : null}
       {stage === "writing" ? <LiveWriting rounds={rounds} step={step} started={started} current={before} /> : null}
       {stage === "deploying" ? (
         <div className="card p-6">
@@ -395,7 +468,7 @@ export function CodeWriter({
                     ))}
                   </ul>
                 </ErrorBox>
-                <button type="button" className="btn btn-quiet mt-2" onClick={() => changeIt("Fix these problems: " + written.problems.join(" | "))}>
+                <button type="button" className="btn btn-quiet mt-2" onClick={() => run(changeIt("Fix these problems: " + (check?.problems || written.problems).join(" | ")))}>
                   Ask the AI to fix them
                 </button>
               </div>
@@ -441,7 +514,7 @@ export function CodeWriter({
                 placeholder="e.g. Round the margin to two decimals and refuse plans under 10,000."
               />
             </label>
-            <button type="button" className="btn btn-quiet mt-2" disabled={change.trim().length < 5} onClick={() => changeIt(change.trim())}>
+            <button type="button" className="btn btn-quiet mt-2" disabled={change.trim().length < 5} onClick={() => run(changeIt(change.trim()))}>
               Make this change
             </button>
           </div>
@@ -534,7 +607,7 @@ export function CodeWriter({
                 ))}
               </ul>
               {failed.length ? (
-                <button type="button" className="btn btn-primary mt-4" onClick={() => changeIt("", failed)}>
+                <button type="button" className="btn btn-primary mt-4" onClick={() => run(changeIt("", failed))}>
                   Ask the AI to fix what failed
                 </button>
               ) : null}

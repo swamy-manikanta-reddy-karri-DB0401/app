@@ -119,6 +119,12 @@ def cached(endpoint: str, messages: list) -> list:
     (the end of the conversation so far). Tool results are not marked: custom agents shorten older ones after each
     step (`_shrink`), which changes them, so a mark there was written (at 1.25x) and never read; measured on the
     Media Planner, marking them saved nothing. A copy is returned: what the model sent is still echoed unchanged."""
+    # A message may ask for a mark itself (`"cache": True`): a long part that stays the same while what follows it
+    # changes, such as the code writer's project (its fix rounds and changes come after it). The key never reaches
+    # the endpoint. Claude takes at most four marks; the system message, one of these and the last message is three.
+    flagged = {i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("cache")}
+    if any(isinstance(m, dict) and "cache" in m for m in messages):
+        messages = [{k: v for k, v in m.items() if k != "cache"} if isinstance(m, dict) and "cache" in m else m for m in messages]
     if "claude" not in endpoint.lower():
         return messages
     out = list(messages)
@@ -130,6 +136,8 @@ def cached(endpoint: str, messages: list) -> list:
 
     if out and out[0].get("role") == "system":
         mark(0)
+    for i in sorted(flagged)[:1]:
+        mark(i)
     last_user = next((i for i in range(len(out) - 1, 0, -1) if out[i].get("role") == "user"), None)
     if last_user is not None:
         mark(last_user)
@@ -216,6 +224,7 @@ def stream_complete(endpoint: str, messages: list, user_tok: str, max_tokens: in
         raise DbxError("That model name is not valid. Choose another model.", 400)
     body = {"messages": cached(endpoint, messages), "max_tokens": max_tokens, "stream": True}
     out: list[str] = []
+    seen: dict = {}
     for attempt in (1, 2):
         try:
             with http().stream("POST", host() + "/serving-endpoints/" + endpoint + "/invocations",
@@ -237,9 +246,12 @@ def stream_complete(endpoint: str, messages: list, user_tok: str, max_tokens: in
                     if data == "[DONE]":
                         break
                     try:
-                        delta = (json.loads(data).get("choices") or [{}])[0].get("delta") or {}
+                        chunk = json.loads(data)
+                        delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
                     except ValueError:
                         continue
+                    if isinstance(chunk.get("usage"), dict):
+                        seen = chunk["usage"]  # the last chunk carries the final counts
                     c = delta.get("content")
                     pieces = [c] if isinstance(c, str) else [b.get("text", "") for b in c or []
                                                             if isinstance(b, dict) and b.get("type") == "text"]
@@ -247,6 +259,10 @@ def stream_complete(endpoint: str, messages: list, user_tok: str, max_tokens: in
                         if piece:
                             out.append(piece)
                             on_text(piece)
+            if seen:
+                # Token counts with what came from the prompt cache, so the saving is measured, not assumed.
+                log.info("model %s: %s in (%s read from cache, %s written to it), %s out", endpoint, seen.get("prompt_tokens"),
+                         seen.get("cache_read_input_tokens"), seen.get("cache_creation_input_tokens"), seen.get("completion_tokens"))
             return "".join(out)
         except httpx.RequestError as exc:
             if out:

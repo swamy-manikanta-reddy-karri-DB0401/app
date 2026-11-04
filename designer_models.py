@@ -40,6 +40,7 @@ what they are documented for. Other families may work and may not; the picker sa
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import threading
@@ -52,11 +53,14 @@ ROLES = ("chat", "code", "judge")
 ENV = {"chat": "PORTAL_BUILDER_MODEL", "code": "PORTAL_BUILDER_CODE_MODEL", "judge": "PORTAL_BUILDER_JUDGE_MODEL"}
 QUERYABLE = ("CAN_QUERY", "CAN_MANAGE")
 CACHE_SECONDS = 60
+STALE_SECONDS = 15 * 60   # how long the last good list stands in when the list cannot be read
 NONE_AVAILABLE = ("No AI model is available to you yet. Ask a workspace admin to give you Can Query on a chat model "
                   "(for example a Databricks Claude model), then choose it here.")
 
 _cache: dict[str, tuple[float, list]] = {}
 _lock = threading.Lock()
+_failed: dict[str, str] = {}   # caller -> why the model list could not be read last time
+log = logging.getLogger("portal.designer_models")
 # Models Databricks refused as retired, learnt from a refused call. Lives for the process: a
 # retired model does not come back, and the list is rebuilt from the workspace on restart.
 _retired: set[str] = set()
@@ -184,8 +188,16 @@ def catalog(tok: str) -> list[dict]:
             return hit[1]
     try:
         eps = call("GET", "/api/2.0/serving-endpoints", tok, quiet=True).get("endpoints") or []
-    except DbxError:
-        return []  # listing is a convenience; a pinned or typed model still works
+    except DbxError as exc:
+        # Listing is a convenience; a pinned or typed model still works. A failure for a moment (an expired
+        # sign-in, a timeout) must not look like "no models": the last good list for this caller is used for a
+        # while, and the reason is kept so the message can say the list could not be read.
+        log.warning("model list could not be read: %s", str(exc)[:200])
+        with _lock:
+            _failed[key] = str(exc)[:200]
+            if hit and now - hit[0] < STALE_SECONDS:
+                return hit[1]
+        return []
     out = []
     for e in eps:
         name = e.get("name") or ""
@@ -206,6 +218,7 @@ def catalog(tok: str) -> list[dict]:
     out.sort(key=lambda m: _rank(m["name"]))
     with _lock:
         _cache[key] = (now + CACHE_SECONDS, out)
+        _failed.pop(key, None)
     return out
 
 
@@ -299,6 +312,9 @@ def resolve(requested, tok: str, notes: list | None = None) -> dict:
         else:
             out[role] = d[role]
     if not out["chat"]:
+        why = _failed.get(hashlib.sha256(tok.encode("utf-8")).hexdigest()[:16])
+        if why:
+            raise DbxError("The list of AI models could not be read just now (%s). Try again in a moment." % why[:160], 503)
         raise DbxError(NONE_AVAILABLE, 409)
     out["code"] = out["code"] or out["chat"]
     out["judge"] = out["judge"] or out["chat"]

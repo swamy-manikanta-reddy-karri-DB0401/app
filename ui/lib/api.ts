@@ -203,18 +203,26 @@ export type CodeWritten = {
   };
   diff: CodeFileDiff[];
   fingerprint: string;
-  models: { code: string };
+  /** The models that wrote it: the tests and changes use them, so they never depend on reading the model list again. */
+  models: { chat: string; code: string; judge: string };
   /** The portal's own files (app.py, agent/tools.py, agent/config.json), shown locked. */
   fixed: Record<string, string>;
 };
 /** One model reply while it writes: its text so far, then what the checks found after it (null = not checked yet). */
 export type CodeRound = { kind: "write" | "change" | "fix"; text: string; problems: string[] | null };
-export type CodeCheck = { problems: string[]; report: CodeWritten["report"]; diff: CodeFileDiff[]; fingerprint: string };
+export type CodeCheck = {
+  problems: string[];
+  report: CodeWritten["report"];
+  diff: CodeFileDiff[];
+  fingerprint: string;
+  /** The agent's own files as checked (after a switch of framework, the new agent.py). */
+  code?: Record<string, string>;
+};
 export type CodeTestResult = CodeTest & { answer: string; verdict: "pass" | "fail" | "ungraded"; reason: string; seconds: number };
 export type CodeJob<T> = {
   id: string;
   kind: string;
-  state: "working" | "done" | "failed";
+  state: "working" | "done" | "failed" | "stopped";
   step: string;
   error: string;
   notes: string[];
@@ -1015,8 +1023,16 @@ export const api = {
     request<{ state: string; step: string; app_name: string; note?: string; new?: boolean }>(`/api/admin/code-agents/jobs/${encodeURIComponent(job)}`),
   codeAgentWrite: (setup: CodeSetup, models: Partial<DesignerModels>) =>
     request<{ job: string }>("/api/admin/code-agents/ai/write", { setup, models }),
-  codeAgentChange: (setup: CodeSetup, code: Record<string, string>, request_: string, failures: CodeTestResult[], models: Partial<DesignerModels>) =>
-    request<{ job: string }>("/api/admin/code-agents/ai/change", { setup, code, request: request_, failures, models }),
+  codeAgentChange: (
+    setup: CodeSetup,
+    code: Record<string, string>,
+    request_: string,
+    failures: CodeTestResult[],
+    models: Partial<DesignerModels>,
+    brief_before = ""
+  ) => request<{ job: string }>("/api/admin/code-agents/ai/change", { setup, code, request: request_, failures, models, brief_before }),
+  /** Stop the writing (the model's stream is closed, so no more tokens are spent). */
+  codeAgentStop: (id: string) => request<{ ok: boolean }>(`/api/admin/code-agents/ai/jobs/${encodeURIComponent(id)}/stop`, {}),
   codeAgentWriteJob: (id: string) => request<CodeJob<CodeWritten>>(`/api/admin/code-agents/ai/jobs/${encodeURIComponent(id)}`),
   codeAgentTestJob: (id: string) =>
     request<CodeJob<{ results: CodeTestResult[]; passed: number; judge: string }>>(`/api/admin/code-agents/ai/jobs/${encodeURIComponent(id)}`),

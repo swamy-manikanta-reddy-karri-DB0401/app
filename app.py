@@ -1595,14 +1595,18 @@ def code_agent_change(payload: dict = Body(...), x_forwarded_access_token: str =
     setup = _code_setup(payload, tok)
     request = " ".join(str(payload.get("request") or "").split())[:1500]
     failures = [f for f in payload.get("failures") or [] if isinstance(f, dict)][:6]
-    if not request and not failures:
+    brief_before = str(payload.get("brief_before") or "")[:6000]
+    brief_changed = bool(brief_before.strip()) and brief_before.strip() != setup["task"].strip()
+    if not request and not failures and not brief_changed:
         raise HTTPException(400, "Say what should change, or which tests failed.")
     designer_guard.count_turn(who)
     if request:
         _tool_words(request, "What should change in the code of the agent %s?" % setup["name"], payload, tok)
+    if brief_changed:
+        _tool_words(setup["task"], "What should the agent you are writing code for do?", payload, tok)
     code = {k: str(v) for k, v in (payload.get("code") or {}).items() if isinstance(k, str)}
     j = code_agent.start_write(setup, who, tok, payload.get("models"), current=code_agent.editable(code), request=request,
-                               failures=failures)
+                               failures=failures, brief_before=brief_before if brief_changed else "")
     return {"job": j["id"]}
 
 
@@ -1616,6 +1620,14 @@ def code_agent_check(payload: dict = Body(...), x_forwarded_access_token: str = 
     prev = payload.get("previous")
     prev = code_agent.editable({k: str(v) for k, v in prev.items() if isinstance(k, str)}) if isinstance(prev, dict) else None
     return code_agent.check_code(setup, code, tok, prev)
+
+
+@app.post("/api/admin/code-agents/ai/jobs/{job_id}/stop")
+def code_agent_stop(job_id: str, x_forwarded_access_token: str = Header(None)):
+    """Stop the writing (to change the brief); the model's stream is closed, so it stops spending tokens."""
+    who, _ = _require_developer(x_forwarded_access_token)
+    code_agent.stop(job_id, who)
+    return {"ok": True}
 
 
 @app.get("/api/admin/code-agents/ai/jobs/{job_id}")

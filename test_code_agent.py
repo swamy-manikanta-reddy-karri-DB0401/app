@@ -66,7 +66,7 @@ def scripted(*replies):
     it = iter(replies)
 
     def ask(role, use, notes, messages, tok, max_tokens, on_text):
-        seen.append(messages)
+        seen.append(list(messages))  # a copy: the conversation goes on growing after each reply
         text = next(it)
         for i in range(0, len(text), 50):  # in pieces, as a stream arrives
             on_text(text[i:i + 50])
@@ -241,6 +241,74 @@ def _():
         assert exc.status == 400 and "Never calculate margins" in str(exc)
     finally:
         designer_guard.settings, ca.review, code_upload.start, ca.dm.resolve = saved
+
+
+@case("a changed brief: only the changed lines go to the model, as edits to the current code")
+def _():
+    seen = scripted("=== EDIT agent/logic.py ===\n<<<<<<< SEARCH\n    if net <= 0:\n=======\n    if net < 10000:\n>>>>>>> REPLACE\n=== END EDIT ===\n"
+                    "=== SUMMARY ===\nPlans under 10,000 are refused now.")
+    new = dict(SETUP, task=SETUP["task"] + " Plans under 10,000 are not accepted.")
+    out = ca.write(new, "T", dict(USE), [], current={"agent/logic.py": LOGIC_OK}, brief_before=SETUP["task"], urls={})
+    asked = json.loads(seen[0][-1]["content"])
+    diff = asked["what_the_developer_changed_in_the_brief"]
+    assert "+Plans under 10,000 are not accepted." in diff and "Works out the margin" not in diff.replace(" Works", ""), diff
+    assert "if net < 10000:" in out["code"]["agent/logic.py"] and out["problems"] == []
+    assert out["tests"] == []  # no tests sent: the page keeps its own
+    # the project is its own message, marked for the cache, ahead of what changes
+    assert seen[0][1].get("cache") is True and "project" in json.loads(seen[0][1]["content"])
+
+
+@case("fix rounds are one conversation, so each round reads the earlier ones from the cache")
+def _():
+    bad = LOGIC_OK.replace("    return {\"margin\"", "    eval('1')\n    return {\"margin\"")
+    first = reply({"agent/logic.py": bad})
+    seen = scripted(first, "=== EDIT agent/logic.py ===\n<<<<<<< SEARCH\n    eval('1')\n=======\n    pass\n>>>>>>> REPLACE\n=== END EDIT ===\n")
+    ca.write(SETUP, "T", dict(USE), [], urls={})
+    fix = seen[1]
+    assert fix[:3] == seen[0][:3], "the fix round starts with exactly what was sent before"
+    assert fix[3] == {"role": "assistant", "content": first} and "eval() is not allowed" in fix[4]["content"]
+    # cache marks: Claude gets them (system, the project, the last message); the key never reaches any endpoint
+    import designer
+    marked = designer.cached("databricks-claude-sonnet-5-5", fix)
+    assert all("cache" not in m for m in marked)
+    assert isinstance(marked[1]["content"], list) and marked[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    plain = designer.cached("databricks-gpt-oss-120b", fix)
+    assert all("cache" not in m for m in plain) and isinstance(plain[1]["content"], str)
+
+
+@case("stop: the stream is closed part-way (no more tokens), and the job says stopped, not failed")
+def _():
+    sent = []
+
+    def ask(role, use, notes, messages, tok, max_tokens, on_text):
+        for piece in ["=== FILE agent/logic.py ===\n", "x = 1\n", "y = 2\n", "z = 3\n"]:
+            sent.append(piece)
+            on_text(piece)
+        return "".join(sent)
+    designer.ask_stream = ask
+    flag = {"stop": False}
+    rounds = []
+
+    def stopped():
+        if len(sent) >= 2:
+            flag["stop"] = True
+        return flag["stop"]
+    try:
+        ca.write(SETUP, "T", dict(USE), [], urls={}, rounds=rounds, stopped=stopped)
+        raise AssertionError("not stopped")
+    except ca.Cancelled:
+        pass
+    assert len(sent) == 2, sent  # nothing more was read from the model
+    j = ca._job("dev", "write", lambda j: (_ for _ in ()).throw(ca.Cancelled()))
+    assert j["state"] == "stopped"
+
+
+@case("a switch of framework keeps the agent's own code and takes the other agent.py")
+def _():
+    lg = dict(SETUP, framework="langgraph")
+    out = ca.check_code(lg, {"agent/logic.py": LOGIC_OK}, "T")
+    assert out["code"]["agent/logic.py"] == LOGIC_OK and "create_agent(" in out["code"]["agent/agent.py"]
+    assert out["problems"] == []
 
 
 @case("setup is checked; only Developer mode may write, change, deploy, test or download")

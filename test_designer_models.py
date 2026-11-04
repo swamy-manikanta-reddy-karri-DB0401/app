@@ -291,5 +291,31 @@ def main() -> int:
     return 1 if failed else 0
 
 
+@case("a model list that cannot be read for a moment: the last good one stands in; with none, the message says why")
+def _():
+    from dbx import DbxError
+    real = dm.call
+    good = {"endpoints": [{"name": "databricks-claude-sonnet-5-5", "task": "llm/v1/chat", "state": {"ready": "READY"},
+                           "permission_level": "CAN_QUERY", "endpoint_type": "FOUNDATION_MODEL_API"}]}
+    try:
+        dm._cache.clear(); dm._failed.clear()
+        dm.call = lambda *a, **k: good
+        assert [m["name"] for m in dm.catalog("tok-a")] == ["databricks-claude-sonnet-5-5"]
+        key = next(iter(dm._cache))
+        dm._cache[key] = (__import__("time").time() - 1, dm._cache[key][1])  # the minute is just over, so it is read again...
+        dm.call = lambda *a, **k: (_ for _ in ()).throw(DbxError("Invalid Token", 403))
+        assert [m["name"] for m in dm.catalog("tok-a")] == ["databricks-claude-sonnet-5-5"]  # ...and fails: the last list stands in
+        try:
+            dm.resolve({}, "tok-b")                       # never read for this caller: say the list could not be read
+            raise AssertionError("no error")
+        except DbxError as exc:
+            assert exc.status == 503 and "could not be read just now" in str(exc) and "Invalid Token" in str(exc), str(exc)
+        out = dm.resolve({"chat": "databricks-claude-sonnet-5-5", "judge": "databricks-gpt-oss-120b"}, "tok-b")
+        assert out["chat"] == "databricks-claude-sonnet-5-5" and out["judge"] == "databricks-gpt-oss-120b"  # named models still work
+    finally:
+        dm.call = real
+        dm._cache.clear(); dm._failed.clear()
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

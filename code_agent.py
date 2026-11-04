@@ -401,8 +401,27 @@ def clean_tests(raw) -> list:
     return out[:MAX_TESTS]
 
 
+class Cancelled(DbxError):
+    """The developer stopped it (to change the brief). Raised from inside the stream, which closes the connection, so
+    the model stops writing and no more tokens are spent."""
+
+    def __init__(self):
+        super().__init__("Stopped.", 409)
+
+
+def brief_diff(before: str, after: str) -> str:
+    """What changed in the developer's words, line by line (only the change goes to the model, not a new brief)."""
+    import difflib
+
+    a = [ln for ln in re.split(r"(?<=[.!?])\s+|\n", before or "") if ln.strip()]
+    b = [ln for ln in re.split(r"(?<=[.!?])\s+|\n", after or "") if ln.strip()]
+    return "\n".join(ln for ln in difflib.unified_diff(a, b, "before", "after", lineterm="", n=1)
+                     if not ln.startswith(("---", "+++")))[:4000]
+
+
 def write(setup: dict, tok: str, use: dict, notes: list, current: dict | None = None, request: str = "",
-          failures: list | None = None, step=lambda text: None, urls: dict | None = None, rounds: list | None = None) -> dict:
+          failures: list | None = None, step=lambda text: None, urls: dict | None = None, rounds: list | None = None,
+          brief_before: str = "", stopped=lambda: False) -> dict:
     """Have the code model write (current=None) or change the agent's code, and check it until it passes.
     Returns {code, tests, summary, problems, report}.
 
@@ -411,26 +430,42 @@ def write(setup: dict, tok: str, use: dict, notes: list, current: dict | None = 
     rounds = rounds if rounds is not None else []
 
     def stream(kind: str, msgs: list, max_tokens: int) -> str:
+        if stopped():
+            raise Cancelled()
         rnd = {"kind": kind, "text": "", "problems": None}
         rounds.append(rnd)
 
         def grow(piece: str) -> None:
+            if stopped():
+                raise Cancelled()
             rnd["text"] += piece
         return designer.ask_stream("code", use, notes, msgs, tok, max_tokens, grow)
     project = base(setup, tok, urls)
     if current:
         project.update(current)
     system = {"role": "system", "content": _prompt()}
-    ask: dict = {"project": _context(setup, project)}
-    if request or failures:
-        ask["change_this"] = request
-        ask["failed_tests"] = (failures or [])[:6]
-    msgs = [system, {"role": "user", "content": json.dumps(ask, ensure_ascii=False)}]
+    convo = [system, {"role": "user", "content": json.dumps({"project": _context(setup, project)}, ensure_ascii=False), "cache": True}]
+    if current:
+        ask: dict = {}
+        if brief_before and brief_before.strip() != setup["task"].strip():
+            ask["what_the_developer_changed_in_the_brief"] = brief_diff(brief_before, setup["task"])
+            ask["how"] = ("Change only the code these changed lines affect, as edits. Keep everything else exactly as it is. "
+                          "Send === TESTS === again only if the tests should change.")
+        if request:
+            ask["change_this"] = request
+        if failures:
+            ask["failed_tests"] = failures[:6]
+        convo.append({"role": "user", "content": json.dumps(ask, ensure_ascii=False)})
+    else:
+        convo.append({"role": "user", "content": "Write the agent's code now."})
     step("Writing the code" if not current else "Making the change")
-    reply = stream("write" if not current else "change", msgs, CODE_TOKENS)
+    reply = stream("write" if not current else "change", convo, CODE_TOKENS)
+    convo.append({"role": "assistant", "content": reply})
     files, apply_problems = apply_reply(project, reply)
     apply_problems += _kept_fixed(project, files)
     tests, summary = tests_from(reply), (SUMMARY_RE.search(reply or "") or [None, ""])[1]
+    if current and not tests:
+        tests = []  # the page keeps its tests when a change sends none
     for rnd in range(EDIT_ROUNDS + 1):
         step("Checking the code")
         res = check(setup, files)
@@ -440,11 +475,15 @@ def write(setup: dict, tok: str, use: dict, notes: list, current: dict | None = 
             break
         step("Fixing what the checks found (%d)" % (rnd + 1))
         log.info("code agent %s: round %d, %d problems: %s", setup["name"], rnd + 1, len(problems), " | ".join(problems)[:500])
-        msgs = [system, {"role": "user", "content": json.dumps({"project": _context(setup, files)}, ensure_ascii=False)},
-                {"role": "user", "content": designer.EDIT_PROMPT.replace("Reply ONLY with edits", "Reply ONLY with edits, inside "
-                 "=== EDIT <path> === ... === END EDIT === blocks (or a whole === FILE <path> === block)") +
-                 "\n\nProblems:\n- " + "\n- ".join(problems)}]
-        edit = stream("fix", msgs, designer.EDIT_TOKENS * 2)
+        ask_fix = designer.EDIT_PROMPT.replace("Reply ONLY with edits", "Reply ONLY with edits, inside "
+                                               "=== EDIT <path> === ... === END EDIT === blocks (or a whole === FILE <path> === block)")
+        ask_fix += "\n\nProblems:\n- " + "\n- ".join(problems)
+        if apply_problems:
+            # an edit did not apply, so the model's picture of the file is wrong: show it the file as it is now
+            ask_fix += "\n\nThe files as they are now:\n" + json.dumps(editable(files), ensure_ascii=False)
+        convo.append({"role": "user", "content": ask_fix})
+        edit = stream("fix", convo, designer.EDIT_TOKENS * 2)
+        convo.append({"role": "assistant", "content": edit})
         before = files
         files, apply_problems = apply_reply(files, edit)
         apply_problems += _kept_fixed(before, files)
@@ -467,7 +506,8 @@ def review(setup: dict, result: dict, who: dict, tok: str, use: dict) -> list:
 def _job(owner: str, kind: str, fn) -> dict:
     now = time.time()
     j = {"id": hashlib.sha256(("%s|%s|%s" % (owner, kind, now)).encode()).hexdigest()[:20], "owner": owner, "kind": kind,
-         "state": "working", "step": "Starting", "started": now, "result": None, "error": "", "notes": [], "rounds": []}
+         "state": "working", "step": "Starting", "started": now, "result": None, "error": "", "notes": [], "rounds": [],
+         "stop": False}
     with _lock:
         for k in [k for k, v in _jobs.items() if now - v["started"] > 3 * 3600]:
             _jobs.pop(k, None)
@@ -477,6 +517,8 @@ def _job(owner: str, kind: str, fn) -> dict:
         try:
             j["result"] = fn(j)
             j["state"] = "done"
+        except Cancelled:
+            j.update(state="stopped", step="Stopped")
         except Exception as exc:  # noqa: BLE001 - shown on the screen
             log.warning("code agent %s job failed: %s", kind, str(exc)[:300])
             j.update(state="failed", error=str(exc)[:400])
@@ -490,19 +532,20 @@ def _job(owner: str, kind: str, fn) -> dict:
 
 
 def start_write(setup: dict, who: dict, tok: str, models, current: dict | None = None, request: str = "",
-                failures: list | None = None) -> dict:
+                failures: list | None = None, brief_before: str = "") -> dict:
     notes: list = []
     use = dm.resolve(models, tok, notes)
 
     def fn(j):
         j["notes"] = notes
-        out = write(setup, tok, use, notes, current, request, failures, step=lambda t: j.update(step=t), rounds=j["rounds"])
+        out = write(setup, tok, use, notes, current, request, failures, step=lambda t: j.update(step=t), rounds=j["rounds"],
+                    brief_before=brief_before, stopped=lambda: j["stop"])
         if not out["problems"]:
             j["step"] = "Checking it against your admins' rules"
             out["problems"] = review(setup, out, who, tok, use)
         old = base(setup, tok) if current is None else {**base(setup, tok), **current}
         files = assemble(setup, out["code"], tok, out["tests"])
-        out.update(diff=diff(old, files), fingerprint=fingerprint(setup, out["code"]), models={"code": use["code"]})
+        out.update(diff=diff(old, files), fingerprint=fingerprint(setup, out["code"]), models={r: use[r] for r in ("chat", "code", "judge")})
         return out
     return _job(who.get("user_name") or "", "write", fn)
 
@@ -535,6 +578,14 @@ def start_tests(app_name: str, tests: list, who: dict, tok: str, models) -> dict
     return _job(who.get("user_name") or "", "test", fn)
 
 
+def stop(job_id: str, who: dict) -> None:
+    """Stop a job that is writing (the stream is closed at the next piece of text, so the model stops too)."""
+    j = _jobs.get(job_id or "")
+    if not j or j["owner"] != (who.get("user_name") or ""):
+        raise DbxError("That job is not running any more.", 404)
+    j["stop"] = True
+
+
 def job(job_id: str, who: dict) -> dict:
     j = _jobs.get(job_id or "")
     if not j or j["owner"] != (who.get("user_name") or ""):
@@ -549,7 +600,7 @@ def check_code(setup: dict, code: dict, tok: str, previous: dict | None = None) 
     files = assemble(setup, code, tok)
     res = check(setup, files)
     old = base(setup, tok) if previous is None else {**base(setup, tok), **editable(previous)}
-    return {**res, "diff": diff(old, files), "fingerprint": fingerprint(setup, files)}
+    return {**res, "diff": diff(old, files), "fingerprint": fingerprint(setup, files), "code": editable(files)}
 
 
 def deploy(setup: dict, code: dict, tests: list, approved: str, display_name: str, app_name: str, who: dict, tok: str,

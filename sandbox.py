@@ -377,6 +377,10 @@ def status(tok: str) -> dict:
         return {"state": "taken", "note": "An app called %s exists that the portal did not make, so it is not used." % NAME, "url": ""}
     state, line = mcps._state(app, mcps._progress.get(NAME))
     url = app.get("url") or ""
+    if state == "not_deployed" and time.time() - _setting_up["at"] >= 15 * 60:
+        # Deleted (Databricks lists a deleted app as DELETING for a few minutes). It is never set up again by itself:
+        # a developer chooses to, with the button.
+        return {"state": "none", "note": "It was removed. Set it up again when you want it (it uses 1 of the workspace's 100 apps).", "url": ""}
     if state == "running":
         if time.time() - _setting_up["at"] < 15 * 60 and _setting_up.get("updating"):
             return {"state": "starting", "note": "Updating it.", "url": url}

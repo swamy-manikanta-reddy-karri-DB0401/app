@@ -251,6 +251,9 @@ def _():
         apps[sandbox.NAME] = {"description": sandbox.MARK + " x", "compute_status": {"state": "STOPPED"}, "app_status": {"state": "UNAVAILABLE"}}
         assert sandbox.run({"agent/logic.py": "", "tests/checks.py": ""}, "T")["skipped"].startswith("Switched off")
         assert sandbox._entry()["user_api_scopes"] == []  # nobody's sign-in is forwarded to it
+        # deleted by hand: Databricks lists it as DELETING for a while; it reads as "none" and is never recreated by itself
+        apps[sandbox.NAME] = {"description": sandbox.MARK + " x", "compute_status": {"state": "DELETING"}, "app_status": {"state": "RUNNING"}}
+        assert sandbox.status("T")["state"] == "none" and "removed" in sandbox.status("T")["note"]
     finally:
         mcps.act = real
 

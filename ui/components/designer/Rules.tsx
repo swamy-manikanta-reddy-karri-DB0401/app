@@ -327,6 +327,22 @@ function RulesDialog({
                 one of the designer's own answers is not checked.
               </span>
             </label>
+            <label className="block sm:col-span-2">
+              <span className="text-[13px] font-medium muted">
+                Developers (Developer mode)
+              </span>
+              <input
+                className="field mt-1"
+                value={r.developer_group}
+                maxLength={128}
+                placeholder="No one"
+                onChange={(e) => set({ developer_group: e.target.value })}
+              />
+              <span className="help">
+                Admins in this team can edit a tool&apos;s code and export
+                agents as code. Leave empty to keep code out of sight.
+              </span>
+            </label>
           </section>
         </div>
       )}

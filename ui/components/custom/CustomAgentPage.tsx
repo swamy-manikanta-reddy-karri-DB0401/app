@@ -8,6 +8,7 @@ import { Dialog } from "../deployer/parts";
 import { CloseIcon } from "../icons";
 import { Abilities, ReleasePill, ReleaseSteps, Rules, RunbookView, SafetyCard, TestResults } from "./parts";
 import { UsageFields } from "./Policy";
+import { ExportButton } from "./Export";
 
 /** One custom agent for its builders: where its release is up to, and the one next thing to do. */
 export function CustomAgentPage({
@@ -159,6 +160,7 @@ export function CustomAgentPage({
           <button type="button" className="btn btn-quiet" onClick={() => setPeople(true)}>
             Who can use it
           </button>
+          <ExportButton id={id} name={d.spec.name} />
           {d.live_version ? (
             <button type="button" className="btn btn-quiet ml-auto" onClick={() => setConfirm("retire")}>
               Retire

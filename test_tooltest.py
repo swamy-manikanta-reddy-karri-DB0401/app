@@ -428,6 +428,33 @@ def _():
     assert c.post("/api/admin/designer/tool-test/plan-one", headers=td.H, json={"slug": "sheet-reader", "asks": ""}).status_code == 400
 
 
+@case("Developer mode: off by default; for the chosen team, edit a tool's code by hand through the same checks and approval")
+def _():
+    import designer_guard
+
+    portal, c = routes(BROKEN)
+    saved = designer_guard.settings
+    try:
+        designer_guard.settings = lambda: dict(designer_guard.DEFAULTS)  # nobody is a developer
+        assert c.get("/api/admin/developer", headers=td.H).json()["on"] is False
+        assert c.get("/api/admin/designer/tool-code", params={"slug": "sheet-reader"}, headers=td.H).status_code == 403
+        assert c.post("/api/admin/designer/tool-code/check", headers=td.H, json={"slug": "sheet-reader", "code": FIXED}).status_code == 403
+        designer_guard.settings = lambda: dict(designer_guard.DEFAULTS, developer_group="admins")
+        assert c.get("/api/admin/developer", headers=td.H).json()["on"] is True
+        got = c.get("/api/admin/designer/tool-code", params={"slug": "sheet-reader"}, headers=td.H).json()
+        assert got["code"].strip() == BUGGY.strip()
+        chk = c.post("/api/admin/designer/tool-code/check", headers=td.H, json={"slug": "sheet-reader", "code": FIXED}).json()
+        assert chk["problems"] == [] and chk["diff"] and not chk["same"]
+        evil = BUGGY + "\n\ndef boom(x: int) -> int:\n    \"\"\"x\"\"\"\n    return eval('1')\n"
+        assert c.post("/api/admin/designer/tool-code/check", headers=td.H, json={"slug": "sheet-reader", "code": evil}).json()["problems"]
+        deployed = []
+        forge.install_app = lambda item, who, tok, date: deployed.append(item["code"])
+        r = c.post("/api/admin/designer/tool-test/apply", headers=td.H, json={"slug": "sheet-reader", "code": FIXED, "approved": chk["fingerprint"], "what": "Edited by hand."})
+        assert r.status_code == 200 and r.json()["started"] is True  # the same gate as a repair
+    finally:
+        designer_guard.settings = saved
+
+
 @case("the fix route proposes and deploys nothing; apply needs the exact fingerprint, checks the code again, and deploys in the background")
 def _():
     portal, c = routes(BROKEN)   # the buggy tool is what is deployed

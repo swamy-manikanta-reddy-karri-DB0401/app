@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import access
+import agent_export
 import app_agents
 import attachments
 import audit
@@ -1511,6 +1512,60 @@ def _require_designer(forwarded):
     if not designer_guard.may_use(who):
         raise HTTPException(403, "Your admins have limited the assistant designer to the team %s." % designer_guard.settings()["group"])
     return who, tok
+
+
+def _require_developer(forwarded):
+    """Developer mode (designer_guard.may_develop)."""
+    who, tok = _require_admin(forwarded)
+    if not designer_guard.may_develop(who):
+        raise HTTPException(403, "Developer mode is off for you. An admin can turn it on for a team in Rules for the designer.")
+    return who, tok
+
+
+@app.post("/api/admin/custom-agents/{agent_id}/export")
+def custom_export(agent_id: str, payload: dict = Body(default={}), x_forwarded_access_token: str = Header(None)):
+    """A custom agent as a code project the developer owns (agent_export.py): MLflow ResponsesAgent or LangGraph.
+    Built from the latest version's settings; nothing secret is in it."""
+    who, _ = _require_developer(x_forwarded_access_token)
+    _custom_or_404(agent_id)
+    framework = str((payload or {}).get("framework") or "mlflow")
+    if framework not in agent_export.FRAMEWORKS:
+        raise HTTPException(400, "Choose mlflow or langgraph.")
+    rec = custom_agents.latest(agent_id)
+    data, name = agent_export.build(rec, framework)
+    events.note(action="exported_agent", target=custom_agents.key(agent_id), label=rec["spec"]["name"],
+                detail={"framework": framework, "version": rec["version"]})
+    return Response(data, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="%s"' % name})
+
+
+@app.get("/api/admin/developer")
+def developer_status(x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_admin(x_forwarded_access_token)
+    return {"on": designer_guard.may_develop(who), "team": designer_guard.settings().get("developer_group") or ""}
+
+
+@app.get("/api/admin/designer/tool-code")
+def designer_tool_code(slug: str, x_forwarded_access_token: str = Header(None)):
+    """The code of a tool the designer made, for a developer to edit (read from the workspace, never run here)."""
+    _, tok = _require_developer(x_forwarded_access_token)
+    item = forge.item_from_workspace(_tool_slug({"slug": slug}), tok)
+    return {"slug": item["slug"], "name": item["name"], "code": item["code"], "abilities": item["abilities"],
+            "fingerprint": item["fingerprint"]}
+
+
+@app.post("/api/admin/designer/tool-code/check")
+def designer_tool_code_check(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """A developer's edited code, checked as if new: problems, the diff against what is deployed, and the fingerprint
+    to approve. Nothing is deployed here; the apply route does that with this exact fingerprint."""
+    _, tok = _require_developer(x_forwarded_access_token)
+    slug = _tool_slug(payload)
+    current = forge.item_from_workspace(slug, tok)
+    code = str(payload.get("code") or "")
+    if len(code) > forge.MAX_CODE:
+        raise HTTPException(400, "The code is too long.")
+    new = forge.clean_item({**current, "code": code}) or current
+    return {"problems": new["problems"], "diff": forge.code_diff(current["code"], code), "fingerprint": new["fingerprint"],
+            "same": code.strip() == current["code"].strip()}
 
 
 @app.get("/api/admin/designer/rules")

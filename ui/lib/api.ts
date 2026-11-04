@@ -164,6 +164,8 @@ export type DesignerDraft = {
 /** What the assistant designer may be used for and may build (designer_guard.py), set by admins. */
 export type DesignerRules = {
   group: string;
+  /** The team that gets Developer mode (edit tool code, export agents as code); "" = nobody. */
+  developer_group: string;
   checker: string;
   rules: string[];
   allow_new_tools: boolean;
@@ -925,6 +927,29 @@ export const api = {
   /** One test the admin describes in their own words, written as a real call (not run yet). */
   toolTestPlanOne: (slug: string, asks: string, models: Partial<DesignerModels> = {}) =>
     request<ToolPlan>("/api/admin/designer/tool-test/plan-one", { slug, asks, models }),
+  /** A custom agent as a code project (Developer mode). */
+  exportCustomAgent: async (id: string, framework: "mlflow" | "langgraph"): Promise<{ blob: Blob; file: string }> => {
+    const res = await fetch(`/api/admin/custom-agents/${id}/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ framework }),
+    });
+    if (!res.ok) {
+      let msg = `The export failed (${res.status})`;
+      try {
+        const j = await res.json();
+        msg = j.error || j.detail || msg;
+      } catch {}
+      throw new Error(msg);
+    }
+    const m = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") || "");
+    return { blob: await res.blob(), file: m ? m[1] : "agent.zip" };
+  },
+  developerStatus: () => request<{ on: boolean; team: string }>("/api/admin/developer"),
+  toolCode: (slug: string) =>
+    request<{ slug: string; name: string; code: string; fingerprint: string }>(`/api/admin/designer/tool-code?slug=${encodeURIComponent(slug)}`),
+  checkToolCode: (slug: string, code: string) =>
+    request<{ problems: string[]; diff: string[]; fingerprint: string; same: boolean }>("/api/admin/designer/tool-code/check", { slug, code }),
   designerRules: () => request<{ rules: DesignerRules; can_save: boolean }>("/api/admin/designer/rules"),
   saveDesignerRules: (rules: DesignerRules) => send<{ rules: DesignerRules; can_save: boolean }>("PUT", "/api/admin/designer/rules", { rules }),
   toolTestApply: (slug: string, code: string, approved: string, what: string) =>

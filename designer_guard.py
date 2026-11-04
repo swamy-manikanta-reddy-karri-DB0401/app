@@ -39,6 +39,7 @@ HOST_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-
 GROUP_RE = re.compile(r"^[\w .@+-]{1,128}$")
 DEFAULTS = {
     "group": "admins",           # who may use the designer
+    "developer_group": "",       # who gets Developer mode (edit tool code, export agents as code); "" = nobody
     "checker": "",               # "" = the designer's own chat model
     "rules": [],                 # plain words, e.g. "Never build tools that email people outside the company"
     "allow_new_tools": True,
@@ -68,6 +69,10 @@ def clean(raw) -> dict:
     if not GROUP_RE.match(group):
         raise DbxError("Choose the team that may use the designer.", 400)
     out["group"] = group
+    dev = str(raw.get("developer_group") or "").strip()
+    if dev and not GROUP_RE.match(dev):
+        raise DbxError("Choose the team that gets Developer mode, or leave it empty.", 400)
+    out["developer_group"] = dev
     checker = str(raw.get("checker") or "").strip()
     if checker and not safety.MODEL_RE.match(checker):
         raise DbxError("Choose the model that checks messages, or leave it as the designer's own.", 400)
@@ -120,6 +125,14 @@ def save(raw, who: str) -> dict:
 
 
 # ----------------------------------------------------------------------------- who and how much
+
+def may_develop(who: dict, s: dict | None = None) -> bool:
+    """Developer mode: edit a tool's code, export a custom agent as a code project. Admins in the chosen team only;
+    off for everyone until a team is chosen, so business users never see code."""
+    s = s or settings()
+    g = s.get("developer_group") or ""
+    return bool(g) and bool(who.get("is_admin")) and (g == "admins" or g in (who.get("groups") or []))
+
 
 def may_use(who: dict, s: dict | None = None) -> bool:
     s = s or settings()

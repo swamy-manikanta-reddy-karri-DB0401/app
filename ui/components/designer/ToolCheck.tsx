@@ -120,6 +120,48 @@ export function ToolCheck({
   const [change, setChange] = useState("");
   const [wsBusy, setWsBusy] = useState("");
   const [wsErr, setWsErr] = useState("");
+  // Developer mode: edit the code by hand. The edit goes through the same review as a repair.
+  const [dev, setDev] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  useEffect(() => {
+    api
+      .developerStatus()
+      .then((d) => setDev(d.on))
+      .catch(() => setDev(false));
+  }, []);
+
+  async function openEditor() {
+    setWsErr("");
+    setWsBusy("code");
+    try {
+      setEditing((await api.toolCode(slug)).code);
+    } catch (e: any) {
+      setWsErr(e.message);
+    } finally {
+      setWsBusy("");
+    }
+  }
+
+  async function checkEdit() {
+    if (editing === null) return;
+    setWsErr("");
+    setWsBusy("check");
+    try {
+      const c = await api.checkToolCode(slug, editing);
+      if (c.same) {
+        setWsErr("Nothing changed yet.");
+        return;
+      }
+      setRead(false);
+      setFix({ code: editing, what: "Edited by hand.", diff: c.diff, fingerprint: c.fingerprint, problems: c.problems, no_change: false, notice: "" } as ToolFix);
+      setEditing(null);
+      setStage("reviewing");
+    } catch (e: any) {
+      setWsErr(e.message);
+    } finally {
+      setWsBusy("");
+    }
+  }
 
   useEffect(() => {
     alive.current = true;
@@ -577,6 +619,37 @@ export function ToolCheck({
               Only changes to this tool are accepted here.
             </span>
           </div>
+          {dev ? (
+            <div className="mt-5 border-t pt-4" style={{ borderColor: "var(--line)" }}>
+              <p className="text-[13px] font-medium muted">Developer mode</p>
+              {editing === null ? (
+                <button type="button" className="btn btn-quiet mt-1" disabled={!!wsBusy} onClick={openEditor}>
+                  {wsBusy === "code" ? <Spinner label="Opening…" /> : "Edit the code yourself"}
+                </button>
+              ) : (
+                <>
+                  <textarea
+                    className="field mt-1 min-h-[360px] font-mono text-[12.5px] leading-relaxed"
+                    spellCheck={false}
+                    value={editing}
+                    onChange={(e) => setEditing(e.target.value)}
+                    aria-label="The tool's code"
+                  />
+                  <p className="help">
+                    The same safety checks run on your code. You then see every changed line before it is installed, and all tests run again.
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button type="button" className="btn btn-primary" disabled={!!wsBusy} onClick={checkEdit}>
+                      {wsBusy === "check" ? <Spinner label="Checking…" /> : "Check my changes"}
+                    </button>
+                    <button type="button" className="btn btn-quiet" onClick={() => setEditing(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : null}
         </section>
       ) : null}
 

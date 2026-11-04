@@ -89,6 +89,7 @@ CATEGORY = {
     "retired_assistant": "build",
     "restored_version": "build",
     "designer_refused": "build",
+    "exported_agent": "build",
     "forgot_memory": "questions",
 }
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { MemoryButton } from "./custom/Memory";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -462,6 +463,7 @@ export function Chat({
               {agent.blurb || agent.kind_hint}
             </p>
           </div>
+          {agent.custom_id && agent.memory ? <MemoryButton agentKey={agent.name} /> : null}
           {!historyEnabled && turns.length > 0 ? (
             <button
               type="button"

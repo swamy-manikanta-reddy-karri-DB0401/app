@@ -360,6 +360,10 @@ function sentence(e: PortalEvent): ReactNode {
       return <>{name} put version {d.version ?? "?"} of {b(label)} back live</>;
     case "retired_assistant":
       return <>{name} retired {b(label)}</>;
+    case "designer_refused":
+      return <>The assistant designer refused a message from {name}: {d.why === "against_rule" ? "against your rules for the designer" : "not about building assistants or tools"}</>;
+    case "forgot_memory":
+      return <>{name} cleared what {b(label)} remembers about them</>;
     case "saved_connection":
       return <>{name} {d.replaced ? "replaced" : "saved"} the connection {b(label)}</>;
     default:

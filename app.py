@@ -50,6 +50,7 @@ import llm
 import logbuf
 import logsink
 import mcps
+import memory
 import secure
 import tooltest
 from dbx import DbxError, app_token, auth_mode, in_apps, user_token
@@ -1008,7 +1009,15 @@ def custom_test(agent_id: str, payload: dict = Body(default={}), x_forwarded_acc
             raise HTTPException(400, "That checker model is not one you can use. Choose another.")
         if judge == rec["spec"]["model"]:
             raise HTTPException(400, "Choose a different model to check the answers than the one the agent uses.")
-    return {"job": custom_agents.start_tests(rec, tok, who, full=(payload or {}).get("full", True) is not False, judge=judge)}
+    failed_only = bool((payload or {}).get("failed_only"))
+    if failed_only:
+        t = rec["meta"].get("test") or {}
+        if not t.get("id") or t.get("checksum") != custom_agents.checksum(rec["spec"]):
+            raise HTTPException(409, "The agent changed after the last test, so run the whole test again.")
+        if t.get("passed"):
+            raise HTTPException(409, "Nothing failed in the last test.")
+    return {"job": custom_agents.start_tests(rec, tok, who, full=(payload or {}).get("full", True) is not False, judge=judge,
+                                             failed_only=failed_only)}
 
 
 @app.get("/api/admin/custom-agents/jobs/{job_id}")
@@ -1061,6 +1070,28 @@ def custom_delete(agent_id: str, x_forwarded_access_token: str = Header(None)):
     events.note(action="deleted_assistant", target=custom_agents.key(agent_id), label=s["name"], detail={"type": "Custom agent"})
     custom_agents.delete(agent_id)
     return {"deleted": agent_id}
+
+
+@app.get("/api/custom-agents/memory")
+def my_memory(key: str, x_forwarded_access_token: str = Header(None)):
+    """What a custom agent remembers about the caller (never anyone else: the user comes from their token)."""
+    who, _ = _who(x_forwarded_access_token)
+    rec = custom_agents.resolve(key, who)
+    if not (rec["spec"].get("memory") or {}).get("on"):
+        return {"on": False, "notes": []}
+    return {"on": True, "notes": memory.notes(rec["agent_id"], who.get("user_name") or "")}
+
+
+@app.delete("/api/custom-agents/memory")
+def my_memory_delete(key: str, note: str = "", x_forwarded_access_token: str = Header(None)):
+    """Forget one note (`note` = its id) or all of them (no `note`)."""
+    who, _ = _who(x_forwarded_access_token)
+    rec = custom_agents.resolve(key, who)
+    if note and not re.match(r"^[0-9a-f]{32}$", note):
+        raise HTTPException(400, "That is not a note.")
+    n = memory.forget(rec["agent_id"], who.get("user_name") or "", note_id=note, text="" if note else "*")
+    events.note(action="forgot_memory", target=custom_agents.key(rec["agent_id"]), label=rec["spec"]["name"], detail={"notes": n})
+    return {"forgotten": n}
 
 
 @app.get("/api/approvals")

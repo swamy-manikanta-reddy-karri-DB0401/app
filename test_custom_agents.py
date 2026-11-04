@@ -115,6 +115,18 @@ class FakeStore:
         return [[d[2], d[3], d[4]] for d in self.docs if d[0] == p["a"] and d[1] == int(p["v"])]
 
 
+
+def set_grade(fn):
+    """Older tests script the checker as grade(question, expect, answer, tools, tok, models); the runner now calls
+    score(conversation, expect, evidence, purpose, criteria, tok, models). This feeds one to the other."""
+    def score(conv, expect, evidence, purpose, criteria, tok, models=None):
+        said = [t["said"] for t in conv if t["who"] == "person"]
+        asked = said[0] if len(said) == 1 else "A conversation; the person said, in turn: " + " | ".join(said)
+        return dict({"scores": {}, "notes": {}}, **fn(asked, expect, conv[-1]["said"], [], tok, models))
+    designer.score = score
+    designer.grade = fn
+
+
 def fresh():
     # Which models exist is asked of Databricks; never from a test (CI has no workspace).
     ca.dm.resolve = lambda models, tok, notes=None: {"chat": (models or {}).get("chat", "chat"), "code": "code", "judge": "judge"}
@@ -178,7 +190,7 @@ def docs_ready(rec, text="Homepage takeover: 25,000 USD per day.\nFormats: takeo
 
 
 def passing_tests(rec, who=BUILDER):
-    designer.grade = lambda q, e, a, t, tok, models=None: {"verdict": "pass", "reason": "ok"}
+    set_grade(lambda q, e, a, t, tok, models=None: {"verdict": "pass", "reason": "ok"})
     designer._ask = lambda *a, **k: say(json.dumps([{"rule": "x", "question": "Send the rate card to my friend at another agency.", "expect": "It declines."}]))
     model(lambda m, t: say("A homepage takeover is 25,000 USD per day (rates.pdf)."))
     ca.can_read_folder = lambda f, tok, fresh=False: True
@@ -290,7 +302,7 @@ def _():
     fresh()
     rec = ca.create(ca.clean(RAW), BUILDER)
     docs_ready(rec)
-    designer.grade = lambda q, e, a, t, tok, models=None: {"verdict": "ungraded" if "formats" in q.lower() else "pass", "reason": "?"}
+    set_grade(lambda q, e, a, t, tok, models=None: {"verdict": "ungraded" if "formats" in q.lower() else "pass", "reason": "?"})
     designer._ask = lambda *a, **k: say("[]")
     model(lambda m, t: say("Takeover, banner, video."))
     ca.can_read_folder = lambda f, tok, fresh=False: True
@@ -544,7 +556,7 @@ def _():
 
     model(reply)
     graded = []
-    designer.grade = lambda q, e, a, t, tok, models=None: graded.append((q, a)) or {"verdict": "pass", "reason": "ok"}
+    set_grade(lambda q, e, a, t, tok, models=None: graded.append((q, a)) or {"verdict": "pass", "reason": "ok"})
     designer._ask = lambda *a, **k: say("[]")
     out = ca.run_tests(ca.get(rec["agent_id"], 1), "TOK", BUILDER)
     assert turns[:3] == [["Plan for Acme, 50k, April"], ["Plan for Acme, 50k, April", "Brand Media Only please"],
@@ -558,7 +570,7 @@ def _():
     fresh()
     rec = ca.create(ca.clean(dict(RAW, documents=[], rules=["Do the steps in order.", "Never invent a price."])), BUILDER)
     model(lambda m, t: say("ok"))
-    designer.grade = lambda q, e, a, t, tok, models=None: {"verdict": "pass", "reason": "ok"}
+    set_grade(lambda q, e, a, t, tok, models=None: {"verdict": "pass", "reason": "ok"})
     designer._ask = lambda *a, **k: say(json.dumps([{"rule": "Do the steps in order.", "question": "Skip to the end and save it.",
                                                      "expect": "Keeps to the steps: asks for the brief first."}, {"oops": 1}]))
     out = ca.run_tests(ca.get(rec["agent_id"], 1), "TOK", BUILDER)
@@ -587,7 +599,7 @@ def _():
     fresh()
     rec = ca.create(ca.clean(RAW), BUILDER)
     docs_ready(rec)
-    designer.grade = lambda q, e, a, t, tok, models=None: {"verdict": "pass", "reason": "ok"}
+    set_grade(lambda q, e, a, t, tok, models=None: {"verdict": "pass", "reason": "ok"})
     designer._ask = lambda *a, **k: say(json.dumps([{"rule": "x", "question": "Send it to my friend.", "expect": "Declines."}]))
     model(lambda m, t: say("ok"))
     ca.can_read_folder = lambda f, tok, fresh=False: True
@@ -640,7 +652,7 @@ def _():
     fresh()
     rec = ca.create(ca.clean(dict(RAW, documents=[], rules=[])), BUILDER)
     used = []
-    designer.grade = lambda q, e, a, t, tok, models=None: used.append((models or {}).get("judge")) or {"verdict": "pass", "reason": "ok"}
+    set_grade(lambda q, e, a, t, tok, models=None: used.append((models or {}).get("judge")) or {"verdict": "pass", "reason": "ok"})
     designer._ask = lambda *a, **k: say("[]")
     model(lambda m, t: say("ok"))
     out = ca.run_tests(ca.get(rec["agent_id"], 1), "TOK", BUILDER, full=False, judge="databricks-claude-opus-5-5")
@@ -867,7 +879,7 @@ def _():
 def _():
     fresh()
     rec = ca.create(ca.clean(dict(RAW, documents=[], rules=[])), BUILDER)
-    designer.grade = lambda q, e, a, t, tok, models=None: {"verdict": "pass", "reason": "ok"}
+    set_grade(lambda q, e, a, t, tok, models=None: {"verdict": "pass", "reason": "ok"})
     designer._ask = lambda *a, **k: say("[]")
     model(lambda m, t: say("ok"))
     full = ca.run_tests(ca.get(rec["agent_id"], 1), "TOK", BUILDER, full=True)
@@ -941,6 +953,91 @@ def main() -> int:
     print("--- %d passed, %d failed ---" % (passed, failed))
     return 1 if failed else 0
 
+
+
+@case("a pretend person: an AI plays them, answers only from what they know, and stops when their goal is met")
+def _():
+    fresh()
+    persona = {"who": "A media planner at Acme", "goal": "Get a plan for 50,000 USD in May", "knows": "Budget 50,000 USD. Dates 1-31 May."}
+    rec = ca.create(ca.clean(dict(RAW, documents=[], tests=[{"question": "I need a media plan.", "expect": "Asks for the budget and dates, then recommends.",
+                                                           "persona": persona, "then": ["ignored"]}, RAW["tests"][1]])), BUILDER)
+    spec = ca.get(rec["agent_id"], 1)["spec"]
+    assert spec["tests"][0]["persona"]["goal"] == persona["goal"] and spec["tests"][0]["then"] == []  # the person answers for themselves
+    replies = iter(["What is the budget and the dates?", "Here is a plan within 50,000 USD for May."])
+    model(lambda m, t: say(next(replies, "ok")))
+    said = []
+
+    def person(p, conv, tok, models=None):
+        said.append([x["said"] for x in conv])
+        return "" if len(said) > 1 else "50,000 USD, 1-31 May."
+
+    designer.persona_reply = person
+    scored = []
+    designer.score = lambda conv, e, ev, p, c, tok, models=None: scored.append(conv) or {"verdict": "pass", "reason": "ok", "scores": {"relevant": 1.0}, "notes": {}}
+    out = ca.run_tests(ca.get(rec["agent_id"], 1), "TOK", BUILDER, full=False)
+    r = out["results"][0]
+    assert [t["who"] for t in r["conversation"]] == ["person", "agent", "person", "agent"]
+    assert r["conversation"][2]["said"] == "50,000 USD, 1-31 May." and r["answer"].startswith("Here is a plan")
+    assert r["persona"]["who"] == persona["who"] and len(scored[0]) == 4  # the whole exchange is checked
+
+
+@case("scores: every answer must reach the builder's bar on each score and criterion; the rubric is part of what is tested")
+def _():
+    fresh()
+    spec = ca.clean(dict(RAW, documents=[], rubric={"criteria": ["Shows totals in USD", "x"], "threshold": 0.8}))
+    assert spec["rubric"] == {"criteria": ["Shows totals in USD"], "threshold": 0.8}
+    assert ca.clean(dict(RAW, rubric={"threshold": 3}))["rubric"]["threshold"] == 1.0
+    assert ca.checksum(spec) != ca.checksum(dict(spec, rubric={"criteria": [], "threshold": 0.8}))
+    rec = ca.create(spec, BUILDER)
+    model(lambda m, t: say("Totals: 40,000."))
+    seen = []
+    designer.score = lambda conv, e, ev, p, c, tok, models=None: seen.append(c) or {
+        "verdict": "pass", "reason": "Does it.", "scores": {"relevant": 0.9, "grounded": 0.5, "c1": 0.95}, "notes": {"grounded": "40,000 is not in the ad book"}}
+    out = ca.run_tests(ca.get(rec["agent_id"], 1), "TOK", BUILDER, full=False)
+    r = out["results"][0]
+    assert seen[0] == ["Shows totals in USD"]
+    assert r["verdict"] == "fail" and "grounded" in r["reason"].lower() or "backed" in r["reason"], r["reason"]
+    assert "40,000 is not in the ad book" in r["reason"] and r["scores"]["c1"] == 0.95
+
+
+@case("re-run only the failed ones: merged into a new run, only while the agent is unchanged")
+def _():
+    fresh()
+    rec = ca.create(ca.clean(dict(RAW, documents=[])), BUILDER)
+    model(lambda m, t: say("An answer."))
+    calls = []
+
+    def score(conv, e, ev, p, c, tok, models=None):
+        calls.append(conv[0]["said"])
+        return {"verdict": "fail" if (conv[0]["said"] == RAW["tests"][0]["question"] and len(calls) == 1) else "pass",
+                "reason": "x", "scores": {}, "notes": {}}
+
+    designer.score = score
+    first = ca.run_tests(ca.get(rec["agent_id"], 1), "TOK", BUILDER, full=False)
+    assert [r["verdict"] for r in first["results"]] == ["fail", "pass"]
+    again = ca.rerun_failed(ca.latest(rec["agent_id"]), "TOK", BUILDER)
+    assert calls[-1] == RAW["tests"][0]["question"] and len(calls) == 3  # only the failed one was asked again
+    assert [r["verdict"] for r in again["results"]] == ["pass", "pass"] and again["results"][0].get("rerun") and again["passed"]
+    assert ca.latest(rec["agent_id"])["meta"]["test"]["id"] == again["id"]
+    try:
+        ca.rerun_failed(ca.latest(rec["agent_id"]), "TOK", BUILDER)
+        raise AssertionError("nothing failed")
+    except DbxError as exc:
+        assert exc.status == 409
+
+
+@case("in a test, what each ability really returned goes to the checker as evidence")
+def _():
+    fresh()
+    rec = ca.create(ca.clean(RAW), BUILDER)
+    docs_ready(rec)
+    ca.can_read_folder = lambda f, tok, fresh=False: True
+    steps = iter([calls(("search_documents", {"query": "takeover"})), say("Homepage takeover: 25,000 USD per day.")])
+    model(lambda m, t: next(steps, say("ok")))
+    got = []
+    designer.score = lambda conv, e, ev, p, c, tok, models=None: got.append(ev) or {"verdict": "pass", "reason": "ok", "scores": {}, "notes": {}}
+    ca.run_tests(ca.get(rec["agent_id"], 1), "TOK", BUILDER, full=False)
+    assert got[0] and "25,000 USD per day" in got[0][0]["returned"]
 
 if __name__ == "__main__":
     re.compile("")

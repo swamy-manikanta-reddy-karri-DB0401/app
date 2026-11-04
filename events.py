@@ -88,6 +88,8 @@ CATEGORY = {
     "sent_back": "build",
     "retired_assistant": "build",
     "restored_version": "build",
+    "designer_refused": "build",
+    "forgot_memory": "questions",
 }
 
 COLUMNS = ("at", "actor", "action", "category", "target", "label", "status", "http_status", "ms", "error_kind", "error", "detail")

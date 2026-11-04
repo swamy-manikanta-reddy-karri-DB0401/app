@@ -25,6 +25,8 @@ export type Agent = {
   /** A custom agent run by the portal: which agent and version, its release state, and whether
    *  this is a version still being prepared (shown only to its builders and approvers). */
   custom_id?: string;
+  /** A custom agent that remembers each person between chats (they can see and clear what it keeps). */
+  memory?: boolean;
   version?: number;
   release?: string;
   preview?: boolean;
@@ -524,7 +526,11 @@ export type CustomSpec = {
   data: { space_id: string; title: string }[];
   assistants: { key: string; name: string }[];
   /** A test is one chat: its first message, any follow-ups the person sends, and what a good last answer does. */
-  tests: { question: string; expect: string; then?: string[] }[];
+  tests: CustomTest[];
+  /** What "good" means beyond each test's expectation, and the score every answer must reach. */
+  rubric?: { criteria: string[]; threshold: number };
+  /** Remember each person between chats (memory.py). */
+  memory?: { on: boolean };
   audience: { kind: "group" | "user"; principal: string }[];
   ask_before_changes: boolean;
   /** The approved procedure it follows; saved with the version (sha = which text was approved). */
@@ -584,9 +590,19 @@ export type CustomUsage = {
   questions_today: number;
 };
 
+/** A test: one message, a scripted conversation (`then`), or a pretend person an AI plays (`persona`). */
+export type CustomTest = { question: string; expect: string; then?: string[]; persona?: { who: string; goal: string; knows: string } };
+
 export type CustomTestResult = {
   question: string;
   then?: string[];
+  persona?: { who: string; goal: string; knows: string } | null;
+  /** The whole exchange, the person's and the agent's turns. */
+  conversation?: { who: "person" | "agent"; said: string }[];
+  /** 0-1 scores from the checker (relevant, complete, grounded, no_made_up, in_role, safe, c1...). */
+  scores?: Record<string, number>;
+  notes?: Record<string, string>;
+  rerun?: boolean;
   expect: string;
   rule: string;
   answer: string;
@@ -693,7 +709,8 @@ export const api = {
   customSave: (id: string, spec: CustomSpec) => send<CustomDetail>("PUT", `/api/admin/custom-agents/${id}`, spec),
   customAudience: (id: string, audience: CustomSpec["audience"]) =>
     send<CustomDetail>("PUT", `/api/admin/custom-agents/${id}/audience`, { audience }),
-  customTest: (id: string, full = true, judge = "") => request<{ job: string }>(`/api/admin/custom-agents/${id}/tests`, { full, judge }),
+  customTest: (id: string, full = true, judge = "", failedOnly = false) =>
+    request<{ job: string }>(`/api/admin/custom-agents/${id}/tests`, { full, judge, failed_only: failedOnly }),
   customEstimate: (id: string) =>
     request<{ quick: TestEstimate; full: TestEstimate; judge: string }>(`/api/admin/custom-agents/${id}/tests/estimate`),
   customJob: (job: string) => request<TestJob>(`/api/admin/custom-agents/jobs/${job}`),
@@ -704,12 +721,12 @@ export const api = {
   customRetire: (id: string) => request<CustomDetail>(`/api/admin/custom-agents/${id}/retire`, {}),
   customDelete: (id: string) => send<{ deleted: string }>("DELETE", `/api/admin/custom-agents/${id}`),
   customDraft: (text: string, model?: string) =>
-    request<{ name: string; description: string; instructions: string; rules: string[]; tests: { question: string; expect: string; then?: string[] }[]; notes: string[] }>(
+    request<{ name: string; description: string; instructions: string; rules: string[]; tests: CustomTest[]; notes: string[] }>(
       "/api/admin/custom-agents/draft",
       { text, ...(model ? { models: { chat: model } } : {}) }
     ),
   customSuggestTests: (spec: CustomSpec, model?: string) =>
-    request<{ tests: { question: string; expect: string; then?: string[] }[]; notes: string[] }>("/api/admin/custom-agents/suggest-tests", {
+    request<{ tests: CustomTest[]; notes: string[] }>("/api/admin/custom-agents/suggest-tests", {
       spec,
       ...(model ? { models: { chat: model } } : {}),
     }),
@@ -717,6 +734,9 @@ export const api = {
     request<SafetyView>(approver ? `/api/approvals/${id}/safety` : `/api/admin/custom-agents/${id}/safety`),
   customGuardrails: (model: string, safety: boolean, pii: string) =>
     request<SafetyView["guardrails"]>("/api/admin/custom-agents/guardrails", { model, safety, pii }),
+  myMemory: (key: string) => request<{ on: boolean; notes: { id: string; text: string; at: string }[] }>(`/api/custom-agents/memory?key=${encodeURIComponent(key)}`),
+  forgetMemory: (key: string, note = "") =>
+    send<{ forgotten: number }>("DELETE", `/api/custom-agents/memory?key=${encodeURIComponent(key)}${note ? "&note=" + note : ""}`),
   customUsageLimits: (id: string, usage: UsageLimits) => send<CustomDetail>("PUT", `/api/admin/custom-agents/${id}/usage-limits`, { usage }),
   safetyPolicies: () =>
     request<{ presets: SavedPolicy[]; saved: SavedPolicy[]; can_save: boolean; note: string }>("/api/admin/safety-policies"),

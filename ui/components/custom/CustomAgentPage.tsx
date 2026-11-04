@@ -80,10 +80,10 @@ export function CustomAgentPage({
     api.customEstimate(id).then(setEst).catch(() => setEst(null));
   }, [id, draftVersion, d?.meta.test?.id]);
 
-  async function runTests(full = true) {
+  async function runTests(full = true, failedOnly = false) {
     setErr("");
     try {
-      const { job: jid } = await api.customTest(id, full, judge || est?.judge || "");
+      const { job: jid } = await api.customTest(id, full, judge || est?.judge || "", failedOnly);
       const poll = async () => {
         try {
           const j = await api.customJob(jid);
@@ -246,6 +246,12 @@ export function CustomAgentPage({
           </h3>
           {st === "draft" && !testing ? (
             <div className="flex flex-wrap gap-2">
+              {m.test && !m.test.passed && d.test && d.test.results.some((r) => r.verdict !== "pass" && !r.accepted) ? (
+                <button type="button" className="btn btn-quiet !min-h-[34px] !px-3" disabled={reading} onClick={() => runTests(m.test?.full !== false, true)}
+                  title="Ask only the ones that failed again, after you changed the agent's runbook or tools outside the portal, or to check a flaky answer.">
+                  Re-check the {d.test.results.filter((r) => r.verdict !== "pass" && !r.accepted).length} that failed
+                </button>
+              ) : null}
               <button type="button" className="btn btn-quiet !min-h-[34px] !px-3" disabled={reading} onClick={() => runTests(false)}
                 title="Only your test questions. Good while you are still changing it.">
                 Quick test{est ? ` · ${est.quick.conversations} chats · about ${est.quick.dbus} DBUs` : ""}

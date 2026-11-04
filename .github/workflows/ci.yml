@@ -29,7 +29,7 @@ jobs:
       - name: Portal tests
         run: |
           set -e
-          for t in test_adapters test_builder test_genie test_knowledge test_dashboard test_mcps test_events test_designer test_designer_models test_forge test_tooltest test_attachments test_approvals test_app_agents test_custom_agents test_secure test_designer_guard test_chats; do
+          for t in test_adapters test_builder test_genie test_knowledge test_dashboard test_mcps test_events test_designer test_designer_models test_forge test_tooltest test_attachments test_approvals test_app_agents test_custom_agents test_secure test_designer_guard test_chats test_memory; do
             echo "::group::$t"
             python "$t.py"
             echo "::endgroup::"

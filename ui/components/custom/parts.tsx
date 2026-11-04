@@ -326,8 +326,10 @@ export function SafetyCard({ id, approver = false }: { id: string; approver?: bo
         ...policyLines(v.policy).map(([k, text]) => {
           const good =
             k === "Messages"
-              ? v.policy.input.attacks !== "off"
-              : k === "Checked by"
+              ? v.policy.input.attacks !== "off" && v.policy.input.personal_data !== "off"
+              : k === "Answers"
+                ? v.policy.output.personal_data !== "off"
+                : k === "Checked by"
                 ? !!v.policy.checker || !needsChecker(v.policy)
                 : k === "Usage limits"
                   ? !!(v.policy.usage.requests || v.policy.usage.tokens || v.policy.usage.cost_usd || v.policy.usage.per_person_daily)
@@ -340,6 +342,7 @@ export function SafetyCard({ id, approver = false }: { id: string; approver?: bo
         ["Documents and tools", "What they return is treated as data it never takes orders from", true],
         ["Changes", v.ask_before_changes ? "A tool that changes something waits for the person" : "Tools may change things without asking", v.ask_before_changes],
         ["Data access", "Each person's own Databricks permissions; it cannot see what they cannot", true],
+        ["Where the AI runs", v.residency?.note || "Not known", v.residency?.inside_us_eu === true],
         [
           "Safety tests",
           !v.tests.run

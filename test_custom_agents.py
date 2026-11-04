@@ -831,6 +831,38 @@ def _():
     ca.store.run = real
 
 
+@case("personal data is hidden from the model by default; an agent saved before that keeps what it was tested with")
+def _():
+    import dbx as _dbx
+
+    fresh()
+    spec = ca.clean(dict(RAW, documents=[]))
+    assert spec["policy"]["input"]["personal_data"] == "mask" and spec["policy"]["output"]["personal_data"] == "remove"
+    rec = ca.create(spec, BUILDER)
+    sent = []
+    model(lambda m, t: sent.append(m) or say("Reach Ann at ann@example.com."))
+    out = ca.ask(ca.get(rec["agent_id"], 1), [{"role": "user", "content": "Write to jo@corp.com"}], "TOK", PERSON)
+    assert "jo@corp.com" not in json.dumps(sent[-1]) and "ann@example.com" not in out["reply"]
+    old = {k: v for k, v in spec.items() if k != "policy"}  # as stored before policies existed
+    assert ca.policy_of(old)["input"]["personal_data"] == "off" and ca.checksum(old) == ca.checksum(dict(old))
+    # Where the model runs, from the workspace's own region.
+    saved, saved_sp = _dbx.call, _dbx.app_token
+    try:
+        for region, inside, word in [("centralindia", False, "outside centralindia"), ("eastus2", True, "within that geography"),
+                                     ("japaneast", False, "some Claude models in this region"), ("westeurope", True, "within")]:
+            ca.safety._where.clear()
+            _dbx.call = lambda *a, **k: {"region": region, "cloud": "azure"}
+            r = ca.safety.residency("TOK")
+            assert r["inside_us_eu"] is inside and word in r["note"], (region, r)
+        ca.safety._where.clear()
+        _dbx.call = lambda *a, **k: (_ for _ in ()).throw(DbxError("no", 403))
+        _dbx.app_token = lambda: "SP"
+        assert ca.safety.residency("TOK")["inside_us_eu"] is None
+    finally:
+        _dbx.call, _dbx.app_token = saved, saved_sp
+        ca.safety._where.clear()
+
+
 @case("safety: every full test runs the fixed safety pack, and a quick test can never be sent for approval")
 def _():
     fresh()

@@ -36,7 +36,7 @@ Unity Catalog). It runs inside the client's own Databricks workspace; data does 
 | Information leakage | API docs are off in Apps (`PORTAL_API_DOCS=on` to enable). The server header is removed (`--no-server-header`). Errors return a plain sentence, never a stack trace. API responses are `Cache-Control: no-store`. `Referrer-Policy: strict-origin-when-cross-origin`; `Permissions-Policy` turns off camera, microphone, location, payment, USB and similar. `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy: same-origin`. |
 | Injection | All SQL uses bound parameters; table names are checked against a strict pattern before use. Names that must be inlined (a model name) are checked against `^[\w\-.]{1,128}$` first. |
 | Abuse and denial of service | Request size limits (25 MB JSON, 110 MB uploads; files 100 MB) and a per-person rate limit (`PORTAL_RATE_LIMIT`, default 600 requests a minute) (`secure.py`). Custom agents also have per-person daily and per-period question, token and cost limits. |
-| Vulnerable components | Next.js 16.4.5 and PostCSS 8.5.32: `npm audit` reports 0 vulnerabilities. Python dependencies: `pip-audit` reports none. The UI is a static export: no Next.js server, server actions, middleware or image optimizer run in production. |
+| Vulnerable components | Next.js 16.4.5 and PostCSS 8.5.32: `npm audit` reports 0 vulnerabilities. Python dependencies are pinned to exact versions and `pip-audit` reports none. **CI fails a release** if either finds a known vulnerability. The UI is a static export: no Next.js server, server actions, middleware or image optimizer run in production. |
 | Secrets | Credentials a tool needs go straight to the Databricks secret scope and are never returned, logged, sent to the browser or to an AI model (`connections.py`). Tokens and request bodies are never logged. Key-like text is removed from what people type, files, runbooks and answers before an AI model or a person sees it (`attachments.redact`). |
 | Logging and audit | Every meaningful action is recorded (who, what, when, outcome), never what anyone typed (`events.py`); access changes made in Databricks are read from `system.access.audit`. Retention 180 days. |
 
@@ -54,10 +54,32 @@ Unity Catalog). It runs inside the client's own Databricks workspace; data does 
 | Change control | Custom agents are tested (including a fixed safety test pack) and approved by a chosen person before anyone can use them; any change to what an agent does voids the test and needs a new approval. |
 | Generated code | Tools the designer writes are checked statically and never run inside the portal; they run as separate Databricks Apps with only the folders and settings they declare, after an admin reviews the code. |
 
+## What reaches an AI model
+
+| Sent to the model | Never sent |
+|---|---|
+| What people type and the earlier messages of that chat | Passwords, keys and tokens (removed first, always) |
+| For custom agents: passages of their documents, the runbook, tool results, up to 50 rows of a data answer | Credentials kept for tools (secret scope only) |
+| Files people attach, when the agent reads them | Other people's conversations |
+| In the assistant designer: what the admin types, table and column names | |
+
+- **Personal data is hidden from the model by default** for custom agents: emails, phone and card numbers,
+  IBANs, SSNs and PANs are replaced before a message is sent and removed from answers (policy "Standard").
+  Pattern matching cannot recognise names or postal addresses; a checker model can judge those, but that
+  also sends the text to a model. Agents saved before this default keep the settings they were tested with.
+- Assistants built in Databricks (Supervisor Agents, Genie spaces, Knowledge Assistants) run their own model
+  inside Databricks; the portal's policy cannot apply to them.
+- **Where the model runs.** Databricks documents Anthropic models on Databricks as "hosted by Databricks
+  within the Databricks security perimeter"; the portal calls no third-party AI service. Requests are
+  processed in the workspace's geography for US and EU workspaces. Elsewhere most Claude models need
+  Databricks' cross-Geo processing, which processes requests outside the workspace's region: the portal
+  reads the workspace's region and says so on the model step and the safety card (`safety.residency`).
+- **Not stated in Databricks' public documentation** (ask the Databricks account team in writing): whether
+  prompts are retained and for how long, and that they are never used for training.
+
 ## Data
 
-- Data stays in the client's Databricks workspace. AI models are Databricks model serving endpoints in that
-  workspace; no third-party AI service is called by the portal.
+- Data stays in the client's Databricks account. AI models are Databricks model serving endpoints.
 - The portal's own tables (problem log, activity log, chat history, custom agents and their tests, saved
   safety policies) are Delta tables in a schema the client chooses, governed by Unity Catalog. Chat history is
   optional and purged after `PORTAL_CHAT_RETENTION_DAYS` (default 180).

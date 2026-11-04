@@ -50,10 +50,12 @@ OUTPUT_PII = ("remove", "block", "off")
 ON_OFF = ("block", "off")
 MAX_RULES = 30
 
+# Personal data is kept from the AI model by default (2026-11-04, the product owner's call): emails, phone and
+# card numbers and the like in a message are replaced before it is sent, and removed from answers.
 STANDARD = {
     "name": "Standard",
-    "input": {"attacks": "warn", "personal_data": "off", "secrets": "mask", "unsafe": "off", "max_chars": 16000},
-    "output": {"personal_data": "off", "unsafe": "off"},
+    "input": {"attacks": "warn", "personal_data": "mask", "secrets": "mask", "unsafe": "off", "max_chars": 16000},
+    "output": {"personal_data": "remove", "unsafe": "off"},
     "rules": [],
     "checker": "",
     "on_error": "allow",
@@ -69,6 +71,10 @@ STRICT = {
     "usage": {"requests": 500, "tokens": 1_000_000, "cost_usd": 25, "days": 30, "per_person_daily": 50},
 }
 PRESETS = {"standard": STANDARD, "strict": STRICT}
+# What an agent saved before policies existed was tested with: it keeps exactly that until a new version
+# (with its own test and approval) chooses otherwise.
+LEGACY = dict(STANDARD, name="Standard (before personal data was hidden by default)",
+              input=dict(STANDARD["input"], personal_data="off"), output=dict(STANDARD["output"], personal_data="off"))
 
 
 def _int(v, default: int, lo: int, hi: int) -> int:
@@ -97,10 +103,11 @@ def clean_usage(raw) -> dict:
             "per_person_daily": _int(raw.get("per_person_daily"), 100, 0, 100_000)}
 
 
-def clean_policy(raw, legacy: dict | None = None) -> dict:
+def clean_policy(raw, legacy: dict | None = None, base: dict | None = None) -> dict:
     """A policy as the admin set it, checked. Raises DbxError(400) with a plain reason.
-    `legacy` carries an older agent's budget and reviewer into the policy, so nothing it had is lost."""
-    base = STANDARD
+    `legacy` carries an older agent's budget and reviewer into the policy, so nothing it had is lost;
+    `base` gives the choices left unset (STANDARD for anything new)."""
+    base = base or STANDARD
     raw = raw if isinstance(raw, dict) else {}
     legacy = legacy or {}
     i, o = raw.get("input") if isinstance(raw.get("input"), dict) else {}, raw.get("output") if isinstance(raw.get("output"), dict) else {}
@@ -399,6 +406,56 @@ def usd_per_dbu(model: str, tok: str = "") -> tuple:
     # A price is kept for hours; "not known yet" is asked again after ten minutes (or at once by someone else).
     _price[model] = (time.time() - (0 if val is not None else PRICE_TTL - 600), val, note, _whose(tok))
     return val, note
+
+
+# ----------------------------------------------------------------------------- where the model runs
+
+# Databricks' own documentation (Foundation Model APIs compliance, read 2026-11-04): pay-per-token models are
+# processed in the workspace's geography for US and EU workspaces; elsewhere most Anthropic models are offered
+# only in the US, EU, Japan or Australia, and a workspace outside those needs cross-Geo processing switched on,
+# so requests are processed outside its own region. Learnt live: our workspace is in centralindia and Claude
+# answers, so its requests are processed outside India. The region is read from Databricks, never assumed.
+_US_EU = re.compile(r"^(us-|eu-|europe-)|(^|[a-z])us\d?$|^(east|west|central|northcentral|southcentral|westcentral)us\d?$|"
+                    r"^(north|west)europe$|^(francecentral|germanywestcentral|swedencentral|italynorth|polandcentral|spaincentral|"
+                    r"norwayeast|switzerlandnorth|austriaeast|belgiumcentral|denmarkeast)$")
+_where: dict = {}
+
+
+def residency(tok: str) -> dict:
+    """{"region", "cloud", "inside_us_eu", "note"} for this workspace; region "" with a note when unreadable."""
+    hit = _where.get("v")
+    if hit and time.time() - hit[0] < PRICE_TTL:
+        return hit[1]
+    from dbx import app_token, call
+
+    data = None
+    for t in ([tok] if tok else []) + [None]:
+        try:
+            data = call("GET", "/api/2.1/unity-catalog/metastore_summary", t or app_token(), quiet=True)
+            break
+        except DbxError:
+            continue
+    region = str((data or {}).get("region") or "").lower()
+    if not region:
+        out = {"region": "", "cloud": "", "inside_us_eu": None,
+               "note": "The workspace's region could not be read, so where the AI model processes requests is not known here."}
+    elif _US_EU.search(region):
+        out = {"region": region, "cloud": (data or {}).get("cloud") or "", "inside_us_eu": True,
+               "note": "This workspace is in %s. Databricks processes requests to its AI models within that geography." % region}
+    elif re.search(r"japan|australia|^ap-northeast-1$|^ap-southeast-2$|^asia-northeast1$|^australia-southeast1$", region):
+        out = {"region": region, "cloud": (data or {}).get("cloud") or "", "inside_us_eu": False,
+               "note": ("This workspace is in %s. Databricks processes some Claude models in this region; others are offered only "
+                        "in the US or EU and work here only with cross-Geo processing on, which sends requests outside %s. "
+                        "Databricks' list of models by region says which." % (region, region))}
+    else:
+        out = {"region": region, "cloud": (data or {}).get("cloud") or "", "inside_us_eu": False,
+               "note": ("This workspace is in %s, outside the US and EU. Databricks offers most Claude models only in the US, EU, "
+                        "Japan or Australia; when one of them works here, Databricks' cross-Geo processing is on, so questions, "
+                        "documents and tool results sent to that model are processed outside %s. Confirm with your Databricks "
+                        "account team that this is acceptable for your data." % (region, region))}
+    if region:
+        _where["v"] = (time.time(), out)
+    return out
 
 
 # ----------------------------------------------------------------------------- saved policies

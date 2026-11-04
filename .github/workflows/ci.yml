@@ -37,3 +37,17 @@ jobs:
 
       - name: Deployer tests
         run: python deployer/test_deployer.py
+
+      # A release only ships when no package it uses has a known vulnerability (SECURITY.md).
+      - name: Python packages have no known vulnerabilities
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt -r deployer/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: UI packages have no known vulnerabilities
+        working-directory: ui
+        run: npm audit --omit=dev --audit-level=low

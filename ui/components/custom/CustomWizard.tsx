@@ -187,6 +187,7 @@ export function CustomWizard({
         <div className="space-y-4">
           <h3 className="text-lg font-semibold">Which AI model should it use?</h3>
           {optsErr ? <p className="error">{optsErr}</p> : null}
+          {opts?.residency && opts.residency.inside_us_eu === false ? <p className="notice">{opts.residency.note}</p> : null}
           {!opts && !optsErr ? <Spinner label="Loading the models you can use…" /> : null}
           {opts ? (
             opts.models.length ? (

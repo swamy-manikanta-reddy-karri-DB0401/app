@@ -541,6 +541,7 @@ export type SafetyView = {
   policy: SafetyPolicy;
   live_policy: SafetyPolicy | null;
   price: { usd_per_dbu: number | null; note: string };
+  residency: Residency;
   ask_before_changes: boolean;
   tests: { total: number; good: number; run: boolean; full: boolean };
 };
@@ -625,7 +626,11 @@ export type CustomOptions = {
   data: { space_id: string; title: string; description: string }[];
   assistants: { key: string; name: string; kind: string }[];
   notes: Record<string, string>;
+  /** Where Databricks processes requests to the models, from the workspace's own region. */
+  residency?: Residency;
 };
+
+export type Residency = { region: string; cloud: string; inside_us_eu: boolean | null; note: string };
 
 export type TestEstimate = { conversations: number; dbus: number; basis: string };
 

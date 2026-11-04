@@ -727,6 +727,7 @@ def custom_options(x_forwarded_access_token: str = Header(None)):
     who, tok = _require_admin(x_forwarded_access_token)
     out: dict = {"notes": {}}
     out["models"] = [m for m in designer_models.catalog(tok)]
+    out["residency"] = safety.residency(tok)
     try:
         tools = []
         for e in mcps.listing(tok)["mcps"]:
@@ -829,6 +830,7 @@ def _safety_view(agent_id: str, tok: str) -> dict:
             "policy": custom_agents.policy_of(rec["spec"]),
             "live_policy": custom_agents.policy_of(cur["spec"]) if cur["version"] != rec["version"] else None,
             "price": {"usd_per_dbu": price, "note": note},
+            "residency": safety.residency(tok),
             "ask_before_changes": rec["spec"].get("ask_before_changes", True),
             "tests": {"total": len(safety_results), "good": sum(1 for r in safety_results if r["verdict"] == "pass" or r.get("accepted")),
                       "run": bool(test.get("id")), "full": test.get("full", True)}}

@@ -248,9 +248,10 @@ def policy_of(spec: dict) -> dict:
     if isinstance(spec.get("policy"), dict):
         return spec["policy"]
     try:
-        return safety.clean_policy({}, legacy={"budget": spec.get("budget"), "reviewer": (spec.get("safety") or {}).get("reviewer")})
+        return safety.clean_policy({}, legacy={"budget": spec.get("budget"), "reviewer": (spec.get("safety") or {}).get("reviewer")},
+                                   base=safety.LEGACY)
     except DbxError:
-        return safety.clean_policy({})
+        return safety.clean_policy({}, base=safety.LEGACY)
 
 
 def checksum(spec: dict) -> str:

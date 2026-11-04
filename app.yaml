@@ -12,6 +12,7 @@ command:
   - "0.0.0.0"
   - --port
   - "8000"
+  - --no-server-header
 
 # PER CLIENT: PORTAL_LOG_TABLE is the only line to change for a new workspace.
 # Point it at <an existing catalog>.agent_portal.portal_logs. The app creates

@@ -28,6 +28,7 @@ import clients  # noqa: E402
 import ghub  # noqa: E402
 import home  # noqa: E402
 import readiness  # noqa: E402
+import secure  # noqa: E402
 from common import Api, DeployError  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -53,7 +54,10 @@ def _build() -> str:
 
 BUILD = _build()
 
-app = FastAPI(title="Portal Deployer", docs_url="/api/docs", openapi_url="/api/openapi.json")
+# Off in Databricks Apps unless DEPLOYER_API_DOCS=on: an enterprise scan reports open API docs.
+_DOCS = os.environ.get("DEPLOYER_API_DOCS", "").lower() == "on" or not os.environ.get("DATABRICKS_CLIENT_ID")
+app = FastAPI(title="Portal Deployer", docs_url="/api/docs" if _DOCS else None, redoc_url=None,
+              openapi_url="/api/openapi.json" if _DOCS else None)
 _who: dict = {}
 
 
@@ -64,6 +68,35 @@ async def access_log(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         log.info("%s %s user=%s -> %d (%d ms)", request.method, request.url.path,
                  request.headers.get("x-forwarded-email", "local"), resp.status_code, (time.time() - t0) * 1000)
+    return resp
+
+
+_HTTPS = bool(os.environ.get("DATABRICKS_CLIENT_ID"))
+_SECURITY_HEADERS = secure.headers(WEB, _HTTPS) if os.path.isdir(WEB) else {}
+_RATE = secure.RateLimit(secure.rate_from_env())
+
+
+@app.middleware("http")
+async def _security(request: Request, call_next):
+    """Same protection as the portal (secure.py): headers, cross-site, size and rate checks."""
+    path = request.url.path
+    if path.startswith("/api/"):
+        who = request.headers.get("x-forwarded-email") or ""
+        why = secure.cross_site(request.method, request.headers) or secure.too_big(request.headers)
+        status = 403 if why.startswith("sent") else 413
+        if not why and _RATE.over(who):
+            why, status = "too many requests from you in the last minute; wait a moment", 429
+        if why:
+            log.warning("%s %s user=%s refused: %s", request.method, path, who or "local", why)
+            resp = secure.refuse(status, why)
+        else:
+            resp = await call_next(request)
+        resp.headers.setdefault("Cache-Control", "no-store")
+    else:
+        resp = await call_next(request)
+    for k, v in _SECURITY_HEADERS.items():
+        if not (k == "Content-Security-Policy" and path.startswith("/api/docs")):
+            resp.headers[k] = v
     return resp
 
 

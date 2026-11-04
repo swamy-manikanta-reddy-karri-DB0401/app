@@ -34,6 +34,7 @@ python test_attachments.py                      # offline: designer attachments,
 python test_designer.py                         # offline: assistant designer (scripted model, fake workspace)
 python test_designer_models.py                  # offline: which AI model the designer offers, defaults, validation
 python test_tooltest.py                         # offline: trying a new tool on real input and repairing it (set FORGE_PYTHON too: it also runs a real generated server)
+python test_secure.py                           # offline: security headers, browser policy (CSP), cross-site refusals, size and rate limits
 python test_forge.py                            # offline: new tools (SQL functions, generated MCP servers); set FORGE_PYTHON to a Python with fastmcp+openpyxl+httpx to also load the real server
 python deployer/test_deployer.py                # offline: Portal Deployer (deploy, rollback, health, GitHub, registry)
 ./smoke.sh                                      # live checks vs local server (hits the real workspace; one check costs a few pennies)
@@ -77,6 +78,7 @@ Rules:
 - Tokens and request bodies are never logged.
 - **A credential value never reaches an AI model.** Credentials a tool needs are entered only in the designer's Connect form (`PUT /api/admin/designer/connections/{name}`, `connections.py`), written to the secret scope and never returned, logged or put in the conversation, the draft or browser storage; models only see names and "connected". Anything key-like typed into the designer, or inside a file it reads, is removed before a model call (`attachments.redact`, with a notice on screen), and key files are refused as attachments.
 - Revoking access is a `PUT` of the surviving ACL entries and must **preserve service-principal grants**, or the portal locks itself out. Permission `PATCH` is additive.
+- **Web hardening (`secure.py`, copied to `deployer/secure.py`; `test_secure.py` fails if the copies differ; `SECURITY.md` is the reviewer-facing summary).** Every response: CSP (`'self'` only; inline scripts allowed by SHA-256 hashes computed from `web/*.html` at start-up, so **rebuild the UI before starting the server**; never add `'unsafe-inline'`/`'unsafe-eval'` to `script-src` or load anything from another site), `frame-ancestors 'none'`, X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy, COOP/CORP; HSTS and upgrade-insecure-requests only in Apps. API: `Cache-Control: no-store`; a POST/PUT/PATCH/DELETE whose `Sec-Fetch-Site` is not same-origin/none, or (without it) whose `Origin` is not this host, is refused 403 before any route (CSRF: the Apps proxy signs people in with a cookie); JSON over 25 MB / uploads over 110 MB refused 413; `PORTAL_RATE_LIMIT` requests per person per minute (default 600, 0 = off) 429. API docs are off in Apps unless `PORTAL_API_DOCS=on` (`DEPLOYER_API_DOCS` for the deployer). `--no-server-header` in both app.yaml files. Checked in a real browser (2026-11-04): every page in both themes with no CSP violation, a save from the page passes. Next.js 16.4.5 + PostCSS 8.5.32 (React stays 18.3.1): `npm audit` 0 vulnerabilities; keep it at 0 before a release.
 - Local dev (no Apps runtime) uses the CLI token for both identities and the header badge says "local dev · your CLI identity".
 
 ## Features
@@ -283,7 +285,8 @@ sync_agents.py   CLI: Agent Bricks metadata -> endpoint tags
 test_adapters.py, test_builder.py, test_genie.py, test_knowledge.py, test_dashboard.py, test_designer.py, test_designer_models.py, test_forge.py, test_tooltest.py, smoke.sh   tests
 deployer/        Portal Deployer app + GitHub Actions scripts (see section 11 and deployer/README.md)
 .github/workflows/  ci (tests), release (tag -> GitHub Release), deploy, health
-ui/              Next.js 14 + React 18 + Tailwind 3 + Radix Tabs + react-markdown (components/, lib/api.ts)
+secure.py        web hardening: security headers + CSP, cross-site, size and rate checks (also deployer/secure.py)
+ui/              Next.js 16 + React 18 + Tailwind 3 + Radix Tabs + react-markdown (components/, lib/api.ts)
 web/             built static export that FastAPI serves (committed)
 app.yaml, update-scopes.json   Databricks Apps manifest and user-API scopes
 ```
@@ -296,7 +299,7 @@ app.yaml, update-scopes.json   Databricks Apps manifest and user-API scopes
 - Calls to Databricks go through `dbx.call` and raise `DbxError(message, status)`; routes mirror the status. Use the quiet option for expected failures so they don't pollute the Problems log.
 - All SQL uses bound parameters; identifiers (table names) are validated against `_NAME_RE` before use.
 - The UI talks to the backend only through the typed wrapper in `ui/lib/api.ts`; add new endpoints there. Copy is written for non-technical readers: plain English, no Databricks jargon in user-facing text.
-- Next.js is pinned exactly (`output: "export"`, no server features such as API routes, SSR or middleware).
+- Next.js is pinned exactly (16.4.5; `output: "export"`, no server features such as API routes, SSR or middleware).
 - Don't claim Supervisor Agent, Genie or Knowledge Assistant builder behaviour is verified live; shapes come from the API references and the Databricks create screen (see README).
 
 ## Known gaps

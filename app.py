@@ -48,8 +48,9 @@ import llm
 import logbuf
 import logsink
 import mcps
+import secure
 import tooltest
-from dbx import DbxError, app_token, auth_mode, user_token
+from dbx import DbxError, app_token, auth_mode, in_apps, user_token
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Built by `npm run build` in ui/ (Next.js static export) and copied here.
@@ -57,7 +58,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # plain files and FastAPI serves them.
 WEB = os.path.join(HERE, "web")
 
-app = FastAPI(title="Mediamint Agent Builder", docs_url="/api/docs")
+# The interactive API docs describe every route; an enterprise scan reports them as exposed, so in
+# Databricks Apps they are off unless PORTAL_API_DOCS=on. Local dev keeps them.
+_DOCS = os.environ.get("PORTAL_API_DOCS", "").lower() == "on" or not in_apps()
+app = FastAPI(title="Mediamint Agent Builder", docs_url="/api/docs" if _DOCS else None,
+              redoc_url=None, openapi_url="/api/openapi.json" if _DOCS else None)
 
 
 # stdout/stderr from a Databricks App land in the app's Logs tab (and
@@ -121,6 +126,36 @@ async def _access_log(request: Request, call_next):
     level = logging.WARNING if response.status_code >= 400 else logging.INFO
     log.log(level, "%s %s user=%s -> %s (%d ms)", request.method, request.url.path, _caller(request), response.status_code, ms,
             **_ctx(request, response.status_code))
+    return response
+
+
+_HTTPS = in_apps()
+_SECURITY_HEADERS = secure.headers(WEB, _HTTPS)
+_RATE = secure.RateLimit(secure.rate_from_env())
+
+
+@app.middleware("http")
+async def _security(request: Request, call_next):
+    """Security headers on every response; cross-site, size and rate checks on the API (secure.py).
+    Registered after the access log, so it runs first and a refused request never reaches a route."""
+    path = request.url.path
+    if path.startswith("/api/"):
+        why = secure.cross_site(request.method, request.headers) or secure.too_big(request.headers)
+        status = 403 if why.startswith("sent") else 413
+        if not why and _RATE.over(_caller(request) if _caller(request) != "unknown" else ""):
+            why, status = "too many requests from you in the last minute; wait a moment", 429
+        if why:
+            log.warning("%s %s user=%s refused: %s", request.method, path, _caller(request), why, **_ctx(request, status))
+            response = secure.refuse(status, why)
+        else:
+            response = await call_next(request)
+        response.headers.setdefault("Cache-Control", "no-store")
+    else:
+        response = await call_next(request)
+    for k, v in _SECURITY_HEADERS.items():
+        if k == "Content-Security-Policy" and path.startswith("/api/docs"):
+            continue  # the docs page loads its viewer from a CDN; only offered when switched on
+        response.headers[k] = v
     return response
 
 

@@ -21,6 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import app_agents
+import cache
 import custom_agents
 from dbx import AGENT_TASK_PREFIX, PORTAL_TAG, QUERYABLE, DbxError, app_token, call
 
@@ -37,15 +38,27 @@ KINDS = {
 }
 
 
+# Who the caller is, for 2 minutes (cache.py): a person removed from `admins` loses the admin pages within
+# that time; what they can query is never cached here (Databricks checks every call).
+IDENTITY = cache.TTL(120)
+VISIBLE = cache.TTL(30)   # the assistants a person may see; emptied whenever the portal changes a grant
+
+
 def identity(user_tok: str) -> dict:
+    k = cache.key_of(user_tok)
+    hit = IDENTITY.get(k)
+    if hit is not None:
+        return dict(hit)
     me = call("GET", "/api/2.0/preview/scim/v2/Me", user_tok)
     groups = [g.get("display") for g in me.get("groups", []) if g.get("display")]
-    return {
+    out = {
         "user_name": me.get("userName", ""),
         "display_name": me.get("displayName") or me.get("userName", ""),
         "groups": groups,
         "is_admin": ADMIN_GROUP in groups,
     }
+    IDENTITY.put(k, out)
+    return dict(out)
 
 
 def _prettify(name: str) -> str:
@@ -341,6 +354,16 @@ def visible_agents(who: dict, app_tok: str, user_tok: str = "") -> list:
     shown - Databricks already said this person may use it, and an unexplained
     entry is better than hiding something they can legitimately open.
     """
+    k = cache.key_of(user_tok or app_tok) + "|" + (who.get("user_name") or "")
+    hit = VISIBLE.get(k)
+    if hit is not None:
+        return [dict(a) for a in hit]
+    out = _visible(who, app_tok, user_tok)
+    VISIBLE.put(k, out)
+    return [dict(a) for a in out]
+
+
+def _visible(who: dict, app_tok: str, user_tok: str = "") -> list:
     listing_tok = user_tok or app_tok
     # The three sources are independent, so they are read side by side. Measured live (2026-11-02):
     # one after another, with each guest list read in turn, this took 15 s for 21 assistants.

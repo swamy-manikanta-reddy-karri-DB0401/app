@@ -1,5 +1,6 @@
 "use client";
 
+import { DesignerRulesButton } from "./designer/Rules";
 import { useEffect, useRef, useState } from "react";
 import { Agent, api, CustomSpec, CustomSummary, BuilderTool, DesignerInfo, FileSettings, McpEntry, SourceItem, ToolType } from "@/lib/api";
 import { ErrorBox, Select, Spinner, Tag, useLoad } from "./bits";
@@ -294,6 +295,7 @@ export function Builder({ onGoto, onTry, agents }: { onGoto?: (tab: string) => v
                     Describe your assistant <ArrowRightIcon size={16} />
                   </button>
                   {!designer.ready ? <p className="max-w-xs text-sm muted">{designer.reason}</p> : null}
+                  <DesignerRulesButton models={designer.models || []} />
                 </div>
               </div>
             </section>

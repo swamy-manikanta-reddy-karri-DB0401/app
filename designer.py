@@ -58,6 +58,7 @@ import access
 import attachments
 import builder
 import connections
+import designer_guard
 import designer_models as dm
 import forge
 import genie
@@ -106,17 +107,46 @@ class ModelRetired(DbxError):
 RETIRED = re.compile(r"deprecated|retired|decommission|no longer (?:available|supported)", re.I)
 
 
+CACHE_MIN_CHARS = 4000   # about 1,000 tokens: Claude caches nothing shorter, so marking it would only add noise
+
+
+def cached(endpoint: str, messages: list) -> list:
+    """The messages with prompt-cache marks on the parts that stay the same from one step to the next, for Claude
+    only (Databricks accepts `cache_control` only on its Claude endpoints). Learnt live (2026-11-04,
+    databricks-claude-sonnet-5-5): an identical second call read 8,073 of 8,086 prompt tokens from the cache, and
+    Databricks prices a cache read at about a tenth of an input token and a cache write at about 1.25 times. Marks go
+    on the system message (instructions, runbook, and the tool list before it) and on the person's latest message
+    (the end of the conversation so far). Tool results are not marked: custom agents shorten older ones after each
+    step (`_shrink`), which changes them, so a mark there was written (at 1.25x) and never read; measured on the
+    Media Planner, marking them saved nothing. A copy is returned: what the model sent is still echoed unchanged."""
+    if "claude" not in endpoint.lower():
+        return messages
+    out = list(messages)
+
+    def mark(i):
+        m = out[i]
+        if isinstance(m.get("content"), str) and len(m["content"]) >= CACHE_MIN_CHARS:
+            out[i] = dict(m, content=[{"type": "text", "text": m["content"], "cache_control": {"type": "ephemeral"}}])
+
+    if out and out[0].get("role") == "system":
+        mark(0)
+    last_user = next((i for i in range(len(out) - 1, 0, -1) if out[i].get("role") == "user"), None)
+    if last_user is not None:
+        mark(last_user)
+    return out
+
+
 def _complete(endpoint: str, messages: list, tools: list | None, user_tok: str, max_tokens: int = 3000, usage: list | None = None) -> dict:
     """One chat completion under the admin's token. Returns the assistant message
     exactly as the endpoint sent it (it must be echoed back unchanged)."""
     if not re.match(r"^[\w\-.]{1,128}$", endpoint or ""):
         raise DbxError("That model name is not valid. Choose another model.", 400)
     # No temperature: Claude on Databricks refuses it.
-    body: dict = {"messages": messages, "max_tokens": max_tokens}
+    body: dict = {"messages": cached(endpoint, messages), "max_tokens": max_tokens}
     if tools:
         body["tools"] = tools
     resp = None
-    for attempt in (1, 2):
+    for attempt in (1, 2, 3):
         try:
             resp = http().post(
                 host() + "/serving-endpoints/" + endpoint + "/invocations",
@@ -129,9 +159,12 @@ def _complete(endpoint: str, messages: list, tools: list | None, user_tok: str, 
         if resp.status_code == 429 and attempt == 1:
             time.sleep(3)  # a rate limit on the endpoint; one patient retry
             continue
+        if resp.status_code == 400 and "cache_control" in (resp.text or "") and body["messages"] is not messages:
+            body["messages"] = messages  # an endpoint that does not take cache marks gets the plain request
+            continue
         # A model that cannot write that much (several open models stop near 8000) refuses the request
         # outright; ask once more within its limit rather than failing the whole step.
-        if (resp.status_code == 400 and attempt == 1 and body["max_tokens"] > 8000
+        if (resp.status_code == 400 and body["max_tokens"] > 8000
                 and re.search(r"max_tokens|max_new_tokens|maximum (?:context|output)|too (?:large|many) tokens", resp.text or "", re.I)):
             body["max_tokens"] = 8000
             continue
@@ -412,6 +445,7 @@ def check(d: dict) -> list[str]:
                         "the admin and ask whether that is how they work.")
     for q in d.get("open_questions") or []:
         problems.append("Open question, ask the admin and remove it from open_questions once answered: " + q)
+    problems += designer_guard.draft_problems(d)  # what the admins allow to be built (designer_guard.py)
     return problems
 
 
@@ -1289,6 +1323,17 @@ def turn(messages: list, draft: dict, tok: str, models: dict | None = None, owne
     notes: list[str] = []
     use = dm.resolve(models, tok, notes)
     draft = clean_draft(draft)
+    rules = designer_guard.settings()
+    # The message is checked before the model sees it: the designer is not a general chatbot (designer_guard.py).
+    said = next((m for m in reversed(messages or []) if isinstance(m, dict) and m.get("role") == "user"), None)
+    asked = next((m for m in reversed(messages or []) if isinstance(m, dict) and m.get("role") == "assistant"), {}) if said else {}
+    if said and isinstance(said.get("content"), str):
+        seen = designer_guard.check_message(said["content"], {"question": asked.get("content") or "", "options": asked.get("options") or []},
+                                            rules, use["chat"], tok)
+        if not seen["ok"]:
+            return {"reply": seen["reply"], "options": [], "multiple": False, "draft": draft, "ready": False,
+                    "problems": check(draft), "kind_label": KIND_LABEL.get(draft.get("kind", ""), ""), "progress": progress(draft),
+                    "looked": [], "models": use, "notice": "", "connections": {}, "warning": "", "refused": seen["flag"]}
     removed: list = []
     convo = [{"role": "system", "content": _system(draft, tok)}] + (_messages(messages, removed) or [{"role": "user", "content": OPENING}])
     reply, options, multiple, proposed = "", [], False, False
@@ -1365,7 +1410,7 @@ def turn(messages: list, draft: dict, tok: str, models: dict | None = None, owne
                 multiple = bool(args.get("multiple")) and len(options) > 1
                 result, ended = {"asked": True}, True
             elif name == "propose":
-                problems = check(draft) or verify(draft, tok)
+                problems = check(draft) or verify(draft, tok) or designer_guard.review_plan(draft, rules, use["chat"], tok)
                 if problems:
                     result = {"accepted": False, "fix_first": problems}
                 else:
@@ -1388,7 +1433,7 @@ def turn(messages: list, draft: dict, tok: str, models: dict | None = None, owne
     else:
         reply = "Sorry, I lost track for a moment. Could you say that again?"
 
-    reply = reply or "Sorry, I did not catch that. Could you say it another way?"
+    reply = designer_guard.clean_reply(reply or "Sorry, I did not catch that. Could you say it another way?")
     return {"reply": reply, "options": options, "multiple": multiple, "draft": draft,
             "ready": proposed, "problems": check(draft), "kind_label": KIND_LABEL.get(draft.get("kind", ""), ""),
             "progress": progress(draft), "looked": saw, "models": use,

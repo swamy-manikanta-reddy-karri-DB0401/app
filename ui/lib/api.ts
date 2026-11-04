@@ -157,6 +157,18 @@ export type DesignerDraft = {
   open_questions?: string[];
 };
 
+/** What the assistant designer may be used for and may build (designer_guard.py), set by admins. */
+export type DesignerRules = {
+  group: string;
+  checker: string;
+  rules: string[];
+  allow_new_tools: boolean;
+  allow_changes_data: boolean;
+  allowed_hosts: string[];
+  max_new_tools: number;
+  turns_per_day: number;
+};
+
 /** One file of the draft, for the side panel (made from the draft; nothing is stored or run). */
 export type DraftFile = {
   path: string;
@@ -885,8 +897,14 @@ export const api = {
     request<ToolPlan>("/api/admin/designer/tool-test/plan", { slug, models }),
   toolTestRun: (slug: string, test: ToolTest, models: Partial<DesignerModels> = {}) =>
     request<ToolResult>("/api/admin/designer/tool-test/run", { slug, test, models }),
-  toolTestFix: (slug: string, failures: ToolResult[], models: Partial<DesignerModels> = {}) =>
-    request<ToolFix>("/api/admin/designer/tool-test/fix", { slug, failures, models }),
+  /** A repair: after failed tests, or the admin's own words (`request`), or both. */
+  toolTestFix: (slug: string, failures: ToolResult[], models: Partial<DesignerModels> = {}, change = "") =>
+    request<ToolFix>("/api/admin/designer/tool-test/fix", { slug, failures, models, request: change }),
+  /** One test the admin describes in their own words, written as a real call (not run yet). */
+  toolTestPlanOne: (slug: string, asks: string, models: Partial<DesignerModels> = {}) =>
+    request<ToolPlan>("/api/admin/designer/tool-test/plan-one", { slug, asks, models }),
+  designerRules: () => request<{ rules: DesignerRules; can_save: boolean }>("/api/admin/designer/rules"),
+  saveDesignerRules: (rules: DesignerRules) => send<{ rules: DesignerRules; can_save: boolean }>("PUT", "/api/admin/designer/rules", { rules }),
   toolTestApply: (slug: string, code: string, approved: string, what: string) =>
     request<{ started: boolean; app_name: string; since: string }>("/api/admin/designer/tool-test/apply", { slug, code, approved, what }),
   toolTestReady: (slug: string, since: string) =>

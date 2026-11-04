@@ -17,12 +17,17 @@ its title is its first question. Deleting a conversation deletes its rows.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import queue
 import re
 import threading
+import time
 
 import store
 from logsink import TABLE as _LOG_TABLE
+
+log = logging.getLogger("portal.chats")
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 _ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
@@ -82,22 +87,93 @@ def _p(name: str, value, typ: str = "STRING") -> dict:
     return p
 
 
+# Saved in batches by one background writer (2026-11-04, sized for 20,000 people): one INSERT per reply meant
+# tens of thousands of tiny statements a day on the warehouse and as many small files in the table. Rows wait
+# at most FLUSH_SECONDS; a conversation opened meanwhile includes its waiting rows (get_chat), so nothing seems
+# lost. If the queue is full (the warehouse is down for long), the reply is still shown and the save is logged.
+BATCH = 40          # rows per INSERT (7 parameters each; the activity log writes 50 x 13 the same way)
+FLUSH_SECONDS = 2
+_q: "queue.Queue" = queue.Queue(maxsize=5000)
+_pending: list = []           # rows queued or being written, for get_chat
+_plock = threading.Lock()
+_writer: threading.Thread | None = None
+_gone: set = set()            # (user, conversation) deleted while rows were waiting
+_inflight: set = set()        # (user, conversation) being written right now
+
+
 def save(user: str, cid: str, endpoint: str, start_idx: int, messages: list) -> None:
-    """Append messages to a conversation. `messages` are {role, text, meta}."""
+    """Append messages to a conversation. `messages` are {role, text, meta}. Queued; written in batches."""
     if not (enabled() and user and valid_id(cid) and messages):
         return
-    ensure_table()
-    params = [_p("u", user), _p("cid", cid), _p("ep", endpoint)]
-    tuples = []
+    at = time.time()
     for i, m in enumerate(messages):
-        params += [
-            _p(f"i{i}", start_idx + i, "INT"),
-            _p(f"r{i}", m["role"]),
-            _p(f"c{i}", (m.get("text") or "")[:MAX_TEXT]),
-            _p(f"m{i}", json.dumps(m.get("meta") or {}, ensure_ascii=False)),
-        ]
-        tuples.append(f"(:cid, :u, :ep, :i{i}, :r{i}, :c{i}, :m{i}, current_timestamp())")
-    store.run("INSERT INTO " + QUALIFIED + " VALUES " + ", ".join(tuples), params)
+        row = {"cid": cid, "u": user, "ep": endpoint, "i": start_idx + i, "r": m["role"], "c": (m.get("text") or "")[:MAX_TEXT],
+               "m": json.dumps(m.get("meta") or {}, ensure_ascii=False),
+               "t": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(at)) + ".%03d" % (int(at * 1000) % 1000)}
+        try:
+            _q.put_nowait(row)
+        except queue.Full:
+            log.warning("chat history queue is full; a message of conversation %s was not saved", cid)
+            return
+        with _plock:
+            _pending.append(row)
+    _start()
+
+
+def _start() -> None:
+    global _writer
+    if _writer is None or not _writer.is_alive():
+        _writer = threading.Thread(target=_loop, name="chat-writer", daemon=True)
+        _writer.start()
+
+
+def _loop() -> None:
+    while True:
+        rows = [_q.get()]
+        try:
+            while len(rows) < BATCH:
+                rows.append(_q.get(timeout=FLUSH_SECONDS if len(rows) == 1 else 0.3))
+        except queue.Empty:
+            pass
+        _write(rows)
+
+
+def _write(rows: list) -> None:
+    with _plock:
+        keep = [r for r in rows if (r["u"], r["cid"]) not in _gone]
+    if not keep:
+        with _plock:
+            done = {id(r) for r in rows}
+            _pending[:] = [r for r in _pending if id(r) not in done]
+        return
+    rows, every = keep, rows
+    with _plock:
+        _inflight.update((r["u"], r["cid"]) for r in rows)
+    try:
+        ensure_table()
+        params, tuples = [], []
+        for i, r in enumerate(rows):
+            params += [_p(f"cid{i}", r["cid"]), _p(f"u{i}", r["u"]), _p(f"ep{i}", r["ep"]), _p(f"i{i}", r["i"], "INT"),
+                       _p(f"r{i}", r["r"]), _p(f"c{i}", r["c"]), _p(f"m{i}", r["m"]), _p(f"t{i}", r["t"])]
+            tuples.append(f"(:cid{i}, :u{i}, :ep{i}, :i{i}, :r{i}, :c{i}, :m{i}, CAST(:t{i} AS TIMESTAMP))")
+        store.run("INSERT INTO " + QUALIFIED + " VALUES " + ", ".join(tuples), params)
+    except Exception as exc:  # noqa: BLE001 - a failed save never fails a chat; said in the log
+        log.warning("could not save %d chat messages: %s", len(rows), str(exc)[:300])
+    finally:
+        with _plock:
+            done = {id(r) for r in every}
+            _pending[:] = [r for r in _pending if id(r) not in done]
+            _inflight.clear()
+
+
+def flush(timeout: float = 10) -> None:
+    """Wait until queued rows are written (tests; shutting down)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        with _plock:
+            if not _pending:
+                return
+        time.sleep(0.05)
 
 
 def list_chats(user: str, endpoint: str = "") -> list:
@@ -142,6 +218,11 @@ def get_chat(user: str, cid: str) -> list:
         "QUALIFY ROW_NUMBER() OVER (PARTITION BY idx ORDER BY created_at DESC) = 1 ORDER BY idx",
         [_p("u", user), _p("cid", cid)],
     )
+    with _plock:
+        waiting = [[w["i"], w["r"], w["c"], w["m"], w["ep"]] for w in _pending if w["u"] == user and w["cid"] == cid]
+    if waiting:
+        have = {int(r[0]) for r in rows}
+        rows = sorted(list(rows) + [w for w in waiting if w[0] not in have], key=lambda r: int(r[0]))
     out = []
     for r in rows:
         try:
@@ -156,6 +237,19 @@ def get_chat(user: str, cid: str) -> list:
 def delete_chat(user: str, cid: str) -> None:
     if not valid_id(cid):
         return
+    # Rows still waiting are dropped first, so a deleted conversation is never written back by the writer.
+    with _plock:
+        if len(_gone) > 10_000:
+            _gone.clear()
+        _gone.add((user, cid))
+        _pending[:] = [r for r in _pending if not (r["u"] == user and r["cid"] == cid)]
+    # A batch already being written may hold this conversation: delete only after it is in.
+    end = time.time() + 30
+    while time.time() < end:
+        with _plock:
+            if (user, cid) not in _inflight:
+                break
+        time.sleep(0.05)
     ensure_table()
     store.run(
         "DELETE FROM " + QUALIFIED + " WHERE user_name = :u AND conversation_id = :cid",

@@ -63,6 +63,8 @@ def install(model, sources=None, exists=None, models=None):
     designer._tools_that_exist = lambda tok: ""   # the list of existing tools is read from the workspace; tests supply their own
     designer.dm.catalog = lambda tok: [m for m in (models or []) if m["name"] not in designer.dm._retired]
     designer._complete = model
+    # The scripted model plays the designer only; the message check has its own tests (test_designer_guard.py).
+    designer.designer_guard.check_message = lambda *a, **k: {"ok": True, "flag": "test"}
     designer.builder.sources = sources or (lambda kind, tok, catalog="", schema="": {"items": [], "note": ""})
     designer._exists = exists or (lambda path, tok: "")
     designer.builder.list_agents = lambda tok: {"agents": [], "acted_as": "you"}  # never the real workspace

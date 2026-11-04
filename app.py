@@ -39,6 +39,7 @@ import safety
 import dashboard
 import designer
 import designer_files
+import designer_guard
 import designer_models
 import events
 import files as filestore
@@ -102,10 +103,14 @@ async def _more_threads():
     import anyio.to_thread
 
     try:
-        n = max(40, int(os.environ.get("PORTAL_THREADS", "200")))
+        n = max(40, int(os.environ.get("PORTAL_THREADS", "400")))
     except ValueError:
-        n = 200
+        n = 400
     anyio.to_thread.current_default_thread_limiter().total_tokens = n
+
+
+_CHANGES_ACCESS = ("/api/admin/grant", "/api/admin/group", "/api/admin/meta", "/api/admin/custom-agents", "/api/admin/app-agents",
+                   "/api/approvals", "/api/admin/builder", "/api/admin/designer/build", "/api/admin/designer/tools/create")
 
 
 @app.middleware("http")
@@ -123,6 +128,11 @@ async def _access_log(request: Request, call_next):
         events.finish(rec, 500, int((time.monotonic() - start) * 1000), _caller(request))
         raise
     ms = int((time.monotonic() - start) * 1000)
+    if request.method in secure.UNSAFE and response.status_code < 400 and request.url.path.startswith(_CHANGES_ACCESS):
+        # Who may see what just changed: the next request reads it from Databricks again (cache.py).
+        access.VISIBLE.clear()
+        if request.url.path.startswith(("/api/admin/group", "/api/admin/grant")):
+            access.IDENTITY.clear()
     events.finish(rec, response.status_code, ms, _caller(request))
     level = logging.WARNING if response.status_code >= 400 else logging.INFO
     log.log(level, "%s %s user=%s -> %s (%d ms)", request.method, request.url.path, _caller(request), response.status_code, ms,
@@ -1399,8 +1409,11 @@ def knowledge_delete(ka_id: str, x_forwarded_access_token: str = Header(None)):
 @app.get("/api/admin/designer/status")
 def designer_status(x_forwarded_access_token: str = Header(None)):
     """Is the designer on, and which AI models can this admin choose from (read under their own token)."""
-    _, tok = _require_admin(x_forwarded_access_token)
-    return designer.status(tok)
+    who, tok = _require_admin(x_forwarded_access_token)
+    out = designer.status(tok)
+    if not designer_guard.may_use(who):
+        out.update(ready=False, reason="Your admins have limited the assistant designer to the team %s." % designer_guard.settings()["group"])
+    return out
 
 
 @app.post("/api/admin/designer/files")
@@ -1412,7 +1425,7 @@ async def designer_attach(
 ):
     """Attach a file while designing: saved to the folder the admin chose, as the admin
     (so Databricks decides where they may save). Key files are refused (use Connect)."""
-    _, tok = _require_admin(x_forwarded_access_token)
+    _, tok = _require_designer(x_forwarded_access_token)
     blob = await file.read()
     name = file.filename or "file"
     out = attachments.upload(folder, name, blob, tok, on_conflict if on_conflict in ("ask", "replace", "keep_both") else "ask")
@@ -1423,7 +1436,7 @@ async def designer_attach(
 @app.delete("/api/admin/designer/files")
 def designer_detach(path: str, x_forwarded_access_token: str = Header(None)):
     """Remove a file attached a moment ago (before it was sent), as the admin."""
-    _, tok = _require_admin(x_forwarded_access_token)
+    _, tok = _require_designer(x_forwarded_access_token)
     attachments.remove(path, tok)
     return {"ok": True}
 
@@ -1431,7 +1444,7 @@ def designer_detach(path: str, x_forwarded_access_token: str = Header(None)):
 @app.get("/api/admin/designer/connections")
 def designer_connections(names: str = "", x_forwarded_access_token: str = Header(None)):
     """Which of these connections are set. Names only; a value is never returned."""
-    _, tok = _require_admin(x_forwarded_access_token)
+    _, tok = _require_designer(x_forwarded_access_token)
     return {"connections": connections.status([n.strip() for n in names.split(",") if n.strip()][:20], tok)}
 
 
@@ -1440,7 +1453,7 @@ def designer_connect(name: str, payload: dict = Body(...), x_forwarded_access_to
     """Save a credential a tool needs into the workspace's secret store. The value goes
     from this request to Databricks and nowhere else: never logged, never returned,
     never shown to an AI model."""
-    _, tok = _require_admin(x_forwarded_access_token)
+    _, tok = _require_designer(x_forwarded_access_token)
     out = connections.save(name, payload.get("value") or "", str(payload.get("kind") or ""), tok, bool(payload.get("replace")))
     events.note(action="saved_connection", label=out["name"], detail={"replaced": bool(payload.get("replace"))})
     return out
@@ -1451,16 +1464,44 @@ def designer_turn(payload: dict = Body(...), x_forwarded_access_token: str = Hea
     """One exchange of the interview. The browser holds the conversation and the
     draft and sends both each time; nothing is kept here, and what was typed is
     never logged."""
-    who, tok = _require_admin(x_forwarded_access_token)
-    return designer.turn(payload.get("messages") or [], payload.get("draft") or {}, tok, payload.get("models"),
-                         owner=who.get("user_name") or "")
+    who, tok = _require_designer(x_forwarded_access_token)
+    designer_guard.count_turn(who)
+    out = designer.turn(payload.get("messages") or [], payload.get("draft") or {}, tok, payload.get("models"),
+                        owner=who.get("user_name") or "")
+    if out.get("refused"):
+        # Recorded as a fact (off topic / against a rule), never what was typed.
+        events.note(action="designer_refused", target="designer", label="Assistant designer", detail={"why": out["refused"]})
+    return out
+
+
+def _require_designer(forwarded):
+    """An admin in the team the designer rules allow (designer_guard.py)."""
+    who, tok = _require_admin(forwarded)
+    if not designer_guard.may_use(who):
+        raise HTTPException(403, "Your admins have limited the assistant designer to the team %s." % designer_guard.settings()["group"])
+    return who, tok
+
+
+@app.get("/api/admin/designer/rules")
+def designer_rules_get(x_forwarded_access_token: str = Header(None)):
+    """What the designer may be used for and may build: set by admins, applied to every message and build."""
+    _require_admin(x_forwarded_access_token)
+    return {"rules": designer_guard.settings(), "can_save": safety.enabled()}
+
+
+@app.put("/api/admin/designer/rules")
+def designer_rules_put(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    who, _ = _require_admin(x_forwarded_access_token)
+    out = designer_guard.save(payload.get("rules") or {}, who.get("user_name") or "")
+    events.note(action="changed_settings", target="designer", label="Designer rules", detail={"fields": ["designer rules"]})
+    return {"rules": out, "can_save": True}
 
 
 @app.post("/api/admin/designer/draft-files")
 def designer_draft_files(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
     """The side panel's Plan, Files and Changes: the draft as readable files, marked against the previous
     turn's draft. Made from what the browser sends; nothing is stored, no model is asked, nothing is run."""
-    who, _ = _require_admin(x_forwarded_access_token)
+    who, _ = _require_designer(x_forwarded_access_token)
     admin = who.get("user_name") or ""
     cur = designer_files.files(designer.clean_draft(payload.get("draft") or {}), admin)
     prev = designer_files.files(designer.clean_draft(payload["previous"]), admin) if isinstance(payload.get("previous"), dict) else []
@@ -1470,7 +1511,7 @@ def designer_draft_files(payload: dict = Body(...), x_forwarded_access_token: st
 @app.post("/api/admin/designer/draft-files/zip")
 def designer_draft_zip(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
     """All of the draft's files in one ZIP, to keep or share."""
-    who, _ = _require_admin(x_forwarded_access_token)
+    who, _ = _require_designer(x_forwarded_access_token)
     d = designer.clean_draft(payload.get("draft") or {})
     body = designer_files.zip_of(designer_files.files(d, who.get("user_name") or ""), d.get("display_name") or "assistant")
     name = "".join(c if c.isalnum() or c in "-_" else "-" for c in (d.get("display_name") or "assistant")).strip("-") or "assistant"
@@ -1480,7 +1521,7 @@ def designer_draft_zip(payload: dict = Body(...), x_forwarded_access_token: str 
 @app.get("/api/admin/designer/jobs/{job_id}")
 def designer_job(job_id: str, x_forwarded_access_token: str = Header(None)):
     """How a new tool being written in the background is going; when done, the tool itself."""
-    who, _ = _require_admin(x_forwarded_access_token)
+    who, _ = _require_designer(x_forwarded_access_token)
     return designer.job(job_id, who.get("user_name") or "")
 
 
@@ -1492,12 +1533,13 @@ def designer_build(
 ):
     """Approve: build the draft with the same code the wizards use. The draft came
     through the browser, so it is checked again here, whatever the model said."""
-    who, tok = _require_admin(x_forwarded_access_token)
+    who, tok = _require_designer(x_forwarded_access_token)
     if not designer.enabled():
         raise HTTPException(404, "The assistant designer is switched off.")
     draft = designer.clean_draft(payload.get("draft"))
     # Tools the designer proposed must already have been created (see tools/create).
-    problems = designer.check(draft) or designer.verify(draft, tok, created=True)
+    problems = (designer.check(draft) or designer.verify(draft, tok, created=True)
+                or designer_guard.review_plan(draft, designer_guard.settings(), designer_models.resolve(payload.get("models"), tok)["chat"], tok))
     if problems:
         raise HTTPException(400, "It is not ready to build yet: " + " ".join(problems[:3]))
     kind = draft["kind"]
@@ -1523,7 +1565,7 @@ def designer_tools_create(
     again here; functions are created now (as the admin), apps are installed in
     the background and watched through tools/status.
     """
-    who, tok = _require_admin(x_forwarded_access_token)
+    who, tok = _require_designer(x_forwarded_access_token)
     if not designer.enabled():
         raise HTTPException(404, "The assistant designer is switched off.")
     draft = designer.clean_draft(payload.get("draft"))
@@ -1560,7 +1602,7 @@ def designer_tools_create(
 @app.get("/api/admin/designer/tools/status")
 def designer_tools_status(apps: str = "", x_forwarded_access_token: str = Header(None)):
     """Where each new tool's app is up to: not started, getting ready, running or failed."""
-    _, tok = _require_admin(x_forwarded_access_token)
+    _, tok = _require_designer(x_forwarded_access_token)
     names = [a for a in apps.split(",") if re.match(r"^mcp-[a-z0-9][a-z0-9-]{0,60}$", a)][:5]
     return {"apps": forge.app_states(names, tok) if names else {}}
 
@@ -1576,7 +1618,7 @@ def _tool_slug(payload: dict) -> str:
 def designer_tooltest_plan(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
     """Write the calls to try a new tool with, from its real input shapes and the files that are
     really in its folders. Reads only; nothing is called yet."""
-    _, tok = _require_admin(x_forwarded_access_token)
+    _, tok = _require_designer(x_forwarded_access_token)
     if not designer.enabled():
         raise HTTPException(404, "The assistant designer is switched off.")
     slug = _tool_slug(payload)
@@ -1592,7 +1634,7 @@ def designer_tooltest_plan(payload: dict = Body(...), x_forwarded_access_token: 
 def designer_tooltest_run(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
     """Call one ability of a new tool, as an assistant would, and say what came back. Only a read-only
     ability can be run: the tool's own declaration is checked here, not taken from the request."""
-    _, tok = _require_admin(x_forwarded_access_token)
+    _, tok = _require_designer(x_forwarded_access_token)
     slug = _tool_slug(payload)
     forge.item_from_workspace(slug, tok)  # a tool the designer made, and nobody else's
     test = payload.get("test") if isinstance(payload.get("test"), dict) else {}
@@ -1613,14 +1655,46 @@ def designer_tooltest_run(payload: dict = Body(...), x_forwarded_access_token: s
 def designer_tooltest_fix(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
     """Have the code model repair a new tool after a failed test. Proposes only: the result (the new code,
     a diff, what changed, a fingerprint) is shown to the admin and nothing is deployed."""
-    _, tok = _require_admin(x_forwarded_access_token)
+    who, tok = _require_designer(x_forwarded_access_token)
     slug = _tool_slug(payload)
     item = forge.item_from_workspace(slug, tok)
     failures = [f for f in payload.get("failures") or [] if isinstance(f, dict)][:6]
-    if not failures:
-        raise HTTPException(400, "Say what failed.")
-    out = tooltest.propose_fix(item, failures, tok, payload.get("models"))
+    request = " ".join(str(payload.get("request") or "").split())[:1500]
+    if not failures and not request:
+        raise HTTPException(400, "Say what failed, or what you want changed.")
+    if request:
+        designer_guard.count_turn(who)
+        _tool_words(request, "What should change in the tool %s?" % item["name"], payload, tok)
+    out = tooltest.propose_fix(item, failures, tok, payload.get("models"), request=request)
     return {**out, "slug": slug, "name": item["name"]}
+
+
+def _tool_words(words: str, question: str, payload: dict, tok: str) -> None:
+    """What an admin types about a tool goes through the same check as the designer's chat (designer_guard.py)."""
+    seen = designer_guard.check_message(words, {"question": question}, designer_guard.settings(),
+                                        designer_models.resolve(payload.get("models"), tok)["chat"], tok)
+    if not seen["ok"]:
+        events.note(action="designer_refused", target="designer", label="Assistant designer", detail={"why": seen["flag"]})
+        raise HTTPException(400, seen["reply"])
+
+
+@app.post("/api/admin/designer/tool-test/plan-one")
+def designer_tooltest_plan_one(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """One test the admin describes in their own words ("try the Imaginate sheet with a 50,000 budget"), written
+    as a real call from the tool's input shapes. Nothing is run here; the run route runs it (read-only only)."""
+    who, tok = _require_designer(x_forwarded_access_token)
+    designer_guard.count_turn(who)
+    slug = _tool_slug(payload)
+    asks = " ".join(str(payload.get("asks") or "").split())[:600]
+    if len(asks) < 3:
+        raise HTTPException(400, "Describe the test you want.")
+    item = forge.item_from_workspace(slug, tok)
+    _tool_words(asks, "Which test should be tried on the tool %s?" % item["name"], payload, tok)
+    client = tooltest.connect(slug, tok)
+    tools = client.tools()
+    out = tooltest.plan(item, tools, tooltest.facts_for(item, tok), tok, payload.get("models"), asks=asks)
+    out["tests"] = out.get("tests", [])[:1]
+    return out
 
 
 @app.post("/api/admin/designer/tool-test/apply")
@@ -1631,7 +1705,7 @@ def designer_tooltest_apply(
 ):
     """Deploy a repair the admin has read. The code comes back from the browser, so it is checked again
     as if it were new, and `approved` must be the fingerprint of exactly this code on this tool."""
-    who, tok = _require_admin(x_forwarded_access_token)
+    who, tok = _require_designer(x_forwarded_access_token)
     slug = _tool_slug(payload)
     current = forge.item_from_workspace(slug, tok)
     code = str(payload.get("code") or "")
@@ -1654,7 +1728,7 @@ def designer_tooltest_apply(
 @app.get("/api/admin/designer/tool-test/ready")
 def designer_tooltest_ready(slug: str, since: str, x_forwarded_access_token: str = Header(None)):
     """Has a repair gone live yet? The old version keeps answering until the new one is in."""
-    _, tok = _require_admin(x_forwarded_access_token)
+    _, tok = _require_designer(x_forwarded_access_token)
     slug = _tool_slug({"slug": slug})
     if not re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", since or ""):
         raise HTTPException(400, "since must be a time like 2026-10-08T12:00:00Z")
@@ -1663,7 +1737,7 @@ def designer_tooltest_ready(slug: str, since: str, x_forwarded_access_token: str
 
 @app.post("/api/admin/designer/test-plan")
 def designer_test_plan(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
-    _, tok = _require_admin(x_forwarded_access_token)
+    _, tok = _require_designer(x_forwarded_access_token)
     return {"tests": designer.plan_tests(payload.get("draft") or {}, tok, payload.get("models"))}
 
 
@@ -1671,7 +1745,7 @@ def designer_test_plan(payload: dict = Body(...), x_forwarded_access_token: str 
 def designer_assistant_state(endpoint: str, x_forwarded_access_token: str = Header(None)):
     """Is the new assistant up yet? It takes a few minutes, and only appears here
     once it has been shared with the admin."""
-    who, tok = _require_admin(x_forwarded_access_token)
+    who, tok = _require_designer(x_forwarded_access_token)
     for a in access.visible_agents(who, app_token(), tok):
         if a["name"] == endpoint:
             return {"state": "ready" if a["ready"] else "starting"}
@@ -1682,7 +1756,7 @@ def designer_assistant_state(endpoint: str, x_forwarded_access_token: str = Head
 def designer_test_run(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
     """Ask the new assistant one test question as the admin and have a second model
     mark the answer. A failure to answer is a result, not an error."""
-    who, tok = _require_admin(x_forwarded_access_token)
+    who, tok = _require_designer(x_forwarded_access_token)
     endpoint = (payload.get("endpoint") or "").strip()
     question = (payload.get("question") or "").strip()[:500]
     expect = (payload.get("expect") or "").strip()[:500]

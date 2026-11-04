@@ -404,6 +404,30 @@ def _():
     assert [b["params"]["name"] for _, _, b in f.log if b["method"] == "tools/call"] == ["read_sheet"]   # save_plan was never called
 
 
+@case("the admin can ask for a change in their own words, and add a test in their own words; both are checked first")
+def _():
+    import designer_guard
+
+    portal, c = routes(BROKEN)
+    m = td.Model(python_block(FIXED), python_block(FIXED))
+    td.install(m)
+    seen = m.sent
+    words = "Skip rows whose name cell is empty, and accept sheet names in any upper or lower case."
+    r = c.post("/api/admin/designer/tool-test/fix", headers=td.H, json={"slug": "sheet-reader", "failures": [], "request": words})
+    assert r.status_code == 200 and r.json()["code"].strip() == FIXED.strip()
+    sent = json.loads(seen[-1][1][1]["content"])
+    assert sent["admin_asks"] == words and sent["failures"] == []
+    # Off topic is refused before the code model sees it, and recorded without the text.
+    designer_guard.check_message = lambda *a, **k: {"ok": False, "reply": designer_guard.OFF_TOPIC, "flag": "off_topic"}
+    n = len(seen)
+    r = c.post("/api/admin/designer/tool-test/fix", headers=td.H, json={"slug": "sheet-reader", "request": "Write me a cover letter for a job"})
+    assert r.status_code == 400 and "only help design" in r.json()["detail"] and len(seen) == n
+    r = c.post("/api/admin/designer/tool-test/plan-one", headers=td.H, json={"slug": "sheet-reader", "asks": "Write me a cover letter"})
+    assert r.status_code == 400 and len(seen) == n
+    designer_guard.check_message = lambda *a, **k: {"ok": True, "flag": "test"}
+    assert c.post("/api/admin/designer/tool-test/plan-one", headers=td.H, json={"slug": "sheet-reader", "asks": ""}).status_code == 400
+
+
 @case("the fix route proposes and deploys nothing; apply needs the exact fingerprint, checks the code again, and deploys in the background")
 def _():
     portal, c = routes(BROKEN)   # the buggy tool is what is deployed

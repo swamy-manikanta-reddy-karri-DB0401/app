@@ -77,6 +77,27 @@ Unity Catalog). It runs inside the client's own Databricks workspace; data does 
 - **Not stated in Databricks' public documentation** (ask the Databricks account team in writing): whether
   prompts are retained and for how long, and that they are never used for training.
 
+## Keeping the AI to its job
+
+The only place where people type freely to an AI to build things is the assistant designer (admins only).
+It cannot be used as a general chatbot:
+
+- **Every typed message is checked before the designer's AI sees it**, by a model the admin chooses: only
+  designing or fixing assistants and tools, business context and answers to its questions are let through.
+  Anything else gets a polite refusal and is recorded as a fact (never the text). Tested live: 12 of 12
+  correct (general questions, writing posts, poems, scripts and jailbreak attempts refused; real design
+  messages passed).
+- **Admins' own restrictions**, in plain words ("never build tools that email people outside the company"),
+  are applied to every message and to every plan and new tool's code before it can be built.
+- **Fixed switches enforced by code**: whether new tools may be written, whether tools may save or change
+  anything, which websites a tool may call, how many new tools an assistant may have.
+- **Who and how much**: a chosen team, and a daily message limit per person.
+- **No code in the chat**: code is only produced through the reviewed path (static checks, the admin reads
+  it, tries it on real files, approves each change) and never runs inside the portal.
+
+Custom agents that people use are limited by their own safety policy (above) and run only on what they were
+given.
+
 ## Data
 
 - Data stays in the client's Databricks account. AI models are Databricks model serving endpoints.

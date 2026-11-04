@@ -204,9 +204,24 @@ export type CodeWritten = {
   diff: CodeFileDiff[];
   fingerprint: string;
   models: { code: string };
+  /** The portal's own files (app.py, agent/tools.py, agent/config.json), shown locked. */
+  fixed: Record<string, string>;
 };
+/** One model reply while it writes: its text so far, then what the checks found after it (null = not checked yet). */
+export type CodeRound = { kind: "write" | "change" | "fix"; text: string; problems: string[] | null };
+export type CodeCheck = { problems: string[]; report: CodeWritten["report"]; diff: CodeFileDiff[]; fingerprint: string };
 export type CodeTestResult = CodeTest & { answer: string; verdict: "pass" | "fail" | "ungraded"; reason: string; seconds: number };
-export type CodeJob<T> = { id: string; kind: string; state: "working" | "done" | "failed"; step: string; error: string; notes: string[]; result: T | null };
+export type CodeJob<T> = {
+  id: string;
+  kind: string;
+  state: "working" | "done" | "failed";
+  step: string;
+  error: string;
+  notes: string[];
+  result: T | null;
+  started: number;
+  rounds: CodeRound[];
+};
 
 /** One file of the draft, for the side panel (made from the draft; nothing is stored or run). */
 export type DraftFile = {
@@ -1005,10 +1020,21 @@ export const api = {
   codeAgentWriteJob: (id: string) => request<CodeJob<CodeWritten>>(`/api/admin/code-agents/ai/jobs/${encodeURIComponent(id)}`),
   codeAgentTestJob: (id: string) =>
     request<CodeJob<{ results: CodeTestResult[]; passed: number; judge: string }>>(`/api/admin/code-agents/ai/jobs/${encodeURIComponent(id)}`),
-  codeAgentDeploy: (setup: CodeSetup, code: Record<string, string>, tests: CodeTest[], approved: string, display_name: string, app_name: string) =>
+  codeAgentDeploy: (
+    setup: CodeSetup,
+    code: Record<string, string>,
+    tests: CodeTest[],
+    approved: string,
+    display_name: string,
+    app_name: string,
+    models: Partial<DesignerModels>
+  ) =>
     request<{ job: string; app_name: string; new: boolean; files: number }>("/api/admin/code-agents/ai/deploy", {
-      setup, code, tests, approved, display_name, app_name,
+      setup, code, tests, approved, display_name, app_name, models,
     }),
+  /** The checks on code edited by hand (no model, nothing run). */
+  codeAgentCheck: (setup: CodeSetup, code: Record<string, string>) =>
+    request<CodeCheck>("/api/admin/code-agents/ai/check", { setup, code }),
   codeAgentTest: (app_name: string, tests: CodeTest[], models: Partial<DesignerModels>) =>
     request<{ job: string }>("/api/admin/code-agents/ai/test", { app_name, tests, models }),
   codeAgentZip: async (setup: CodeSetup, code: Record<string, string>, tests: CodeTest[]): Promise<{ blob: Blob; file: string }> => {

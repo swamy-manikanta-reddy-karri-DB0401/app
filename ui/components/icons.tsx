@@ -178,6 +178,22 @@ export const WandIcon = ({ size }: P) => (
   </Svg>
 );
 
+/** A padlock: something that cannot be changed here. */
+export const LockIcon = ({ size }: P) => (
+  <Svg size={size}>
+    <rect x="5" y="11" width="14" height="9" rx="2" />
+    <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+  </Svg>
+);
+
+/** A pencil: edited by hand. */
+export const PencilIcon = ({ size }: P) => (
+  <Svg size={size}>
+    <path d="M4 20h4L19 9l-4-4L4 16z" />
+    <path d="m13.5 6.5 4 4" />
+  </Svg>
+);
+
 /** Sliders: settings. */
 export const SlidersIcon = ({ size }: P) => (
   <Svg size={size}>

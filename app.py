@@ -1606,6 +1606,18 @@ def code_agent_change(payload: dict = Body(...), x_forwarded_access_token: str =
     return {"job": j["id"]}
 
 
+@app.post("/api/admin/code-agents/ai/check")
+def code_agent_check(payload: dict = Body(...), x_forwarded_access_token: str = Header(None)):
+    """The checks on the code as the developer edits it by hand (no model, nothing run): problems with their
+    lines, what it can reach, the changes and the fingerprint to approve."""
+    _, tok = _require_developer(x_forwarded_access_token)
+    setup = _code_setup(payload, tok)
+    code = code_agent.editable({k: str(v) for k, v in (payload.get("code") or {}).items() if isinstance(k, str)})
+    prev = payload.get("previous")
+    prev = code_agent.editable({k: str(v) for k, v in prev.items() if isinstance(k, str)}) if isinstance(prev, dict) else None
+    return code_agent.check_code(setup, code, tok, prev)
+
+
 @app.get("/api/admin/code-agents/ai/jobs/{job_id}")
 def code_agent_job(job_id: str, x_forwarded_access_token: str = Header(None)):
     who, _ = _require_developer(x_forwarded_access_token)
@@ -1620,7 +1632,8 @@ def code_agent_deploy(payload: dict = Body(...), x_forwarded_access_token: str =
     setup = _code_setup(payload, tok)
     code = code_agent.editable({k: str(v) for k, v in (payload.get("code") or {}).items() if isinstance(k, str)})
     out = code_agent.deploy(setup, code, payload.get("tests") or [], str(payload.get("approved") or ""),
-                            str(payload.get("display_name") or ""), str(payload.get("app_name") or "").strip(), who, tok)
+                            str(payload.get("display_name") or ""), str(payload.get("app_name") or "").strip(), who, tok,
+                            payload.get("models"))
     events.note(action="uploaded_agent", target="app:" + out["app_name"], label=setup["name"],
                 detail={"files": out["files"], "new": out["new"], "via": "ai", "framework": setup["framework"]})
     return out

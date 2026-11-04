@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import type { CodeSetup, CodeTest, CodeTestResult, CodeWritten, CustomSummary, DesignerModel } from "@/lib/api";
+import type { CodeCheck, CodeRound, CodeSetup, CodeTest, CodeTestResult, CodeWritten, CustomSummary, DesignerModel } from "@/lib/api";
 import { chosen, loadChoice, modelDetail } from "@/lib/designerModels";
 import { ErrorBox, Select, Spinner } from "../bits";
-import { Diff } from "../designer/ToolCheck";
 import { CheckIcon, DownloadIcon, PlusIcon, TrashIcon } from "../icons";
+import { CodeIDE, LiveWriting } from "./CodeWorkbench";
 
 /** Developer mode: the AI writes an agent's code (code_agent.py). Describe it; the code model writes it into the
  *  project our export makes; the developer reads the diff and approves; it is deployed as an app and tested; a
@@ -15,6 +15,7 @@ import { CheckIcon, DownloadIcon, PlusIcon, TrashIcon } from "../icons";
 type Stage = "describe" | "writing" | "review" | "deploying" | "test";
 const STAGES: [Stage, string][] = [
   ["describe", "Describe"],
+  ["writing", "Write"],
   ["review", "Review"],
   ["deploying", "Deploy"],
   ["test", "Test"],
@@ -62,6 +63,14 @@ export function CodeWriter({
   const [deployed, setDeployed] = useState("");
   const [results, setResults] = useState<CodeTestResult[] | null>(null);
   const [testing, setTesting] = useState(false);
+  // the live view, and the code as it is now (the developer may edit it), checked as they type
+  const [rounds, setRounds] = useState<CodeRound[]>([]);
+  const [started, setStarted] = useState(Date.now());
+  const [before, setBefore] = useState<Record<string, string> | null>(null);
+  const [code, setCode] = useState<Record<string, string>>({});
+  const [check, setCheck] = useState<CodeCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+  const checkSeq = useRef(0);
   const alive = useRef(true);
   useEffect(
     () => () => {
@@ -77,16 +86,22 @@ export function CodeWriter({
 
   async function follow(job: string) {
     const t0 = Date.now();
+    setRounds([]);
+    setStarted(t0);
     while (alive.current && Date.now() - t0 < 20 * 60 * 1000) {
-      await wait(4000);
+      await wait(700); // often enough that lines appear as they are written
       const j = await api.codeAgentWriteJob(job);
       if (!alive.current) return;
       setStep(j.step);
       setNotes(j.notes || []);
+      setRounds(j.rounds || []);
       if (j.state === "failed") throw new Error(j.error || "The code could not be written.");
       if (j.state === "done" && j.result) {
-        setWritten(j.result);
-        if (j.result.tests.length) setTests(j.result.tests);
+        const r = j.result;
+        setWritten(r);
+        setCode(r.code);
+        setCheck({ problems: r.problems, report: r.report, diff: r.diff, fingerprint: r.fingerprint });
+        if (r.tests.length) setTests(r.tests);
         setRead(false);
         setStage("review");
         return;
@@ -95,8 +110,34 @@ export function CodeWriter({
     throw new Error("It took too long. Try again.");
   }
 
+  // Hand edits are checked a moment after the typing stops (no model, nothing run); any edit needs a new approval.
+  function edit(path: string, text: string) {
+    setCode((c) => ({ ...c, [path]: text }));
+    setRead(false);
+  }
+  useEffect(() => {
+    if (stage !== "review" || !written) return;
+    const same = Object.keys(code).every((p) => code[p] === written.code[p]) && Object.keys(code).length === Object.keys(written.code).length;
+    if (same && check?.fingerprint === written.fingerprint) return;
+    const seq = ++checkSeq.current;
+    setChecking(true);
+    const t = setTimeout(async () => {
+      try {
+        const c = await api.codeAgentCheck(setup, code);
+        if (seq === checkSeq.current && alive.current) setCheck(c);
+      } catch (e: any) {
+        if (seq === checkSeq.current) setErr(e.message);
+      } finally {
+        if (seq === checkSeq.current) setChecking(false);
+      }
+    }, 700);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [code]);
+
   async function writeIt() {
     setErr("");
+    setBefore(null);
     setStage("writing");
     setStep("Starting");
     try {
@@ -115,7 +156,8 @@ export function CodeWriter({
     setStage("writing");
     setStep("Making the change");
     try {
-      await follow((await api.codeAgentChange(setup, written.code, request, failures, picks())).job);
+      setBefore(code);
+      await follow((await api.codeAgentChange(setup, code, request, failures, picks())).job);
       setChange("");
     } catch (e: any) {
       setErr(e.message);
@@ -129,7 +171,7 @@ export function CodeWriter({
     setStage("deploying");
     setStep("Checking it again");
     try {
-      const started = await api.codeAgentDeploy(setup, written.code, tests, written.fingerprint, setup.name, deployed || appName.trim());
+      const started = await api.codeAgentDeploy(setup, code, tests, check?.fingerprint || "", setup.name, deployed || appName.trim(), picks());
       setDeployed(started.app_name);
       for (let i = 0; i < 200 && alive.current; i++) {
         await wait(6000);
@@ -190,7 +232,7 @@ export function CodeWriter({
     }
   }
 
-  const at = STAGES.findIndex(([s]) => s === (stage === "writing" ? (written ? "review" : "describe") : stage));
+  const at = STAGES.findIndex(([s]) => s === stage);
   const ready = setup.name.trim().length >= 2 && setup.task.trim().length >= 20 && (setup.source || setup.model);
   const failed = (results || []).filter((r) => r.verdict !== "pass");
 
@@ -330,14 +372,11 @@ export function CodeWriter({
         </div>
       ) : null}
 
-      {stage === "writing" || stage === "deploying" ? (
+      {stage === "writing" ? <LiveWriting rounds={rounds} step={step} started={started} current={before} /> : null}
+      {stage === "deploying" ? (
         <div className="card p-6">
           <Spinner label={`${step || "Working"}…`} />
-          <p className="help">
-            {stage === "writing"
-              ? "The AI writes the code and the portal checks it as text, fixing what the checks find. Nothing runs yet."
-              : "Deploying it as its own app. A new version takes about a minute."}
-          </p>
+          <p className="help">Deploying it as its own app. A new version takes about a minute.</p>
         </div>
       ) : null}
 
@@ -346,7 +385,7 @@ export function CodeWriter({
           <div className="card p-6">
             <h3 className="text-[17px] font-semibold">What the AI wrote</h3>
             {written.summary ? <p className="mt-1 text-[15px]">{written.summary}</p> : null}
-            {written.problems.length ? (
+            {written.problems.length && check?.problems.length ? (
               <div className="mt-3">
                 <ErrorBox>
                   It does not pass the checks yet:
@@ -363,45 +402,29 @@ export function CodeWriter({
             ) : null}
             <h4 className="mt-5 text-[14px] font-semibold">What it can do and reach</h4>
             <ul className="mt-2 space-y-1.5 text-[14px]">
-              {written.report.abilities.map((a) => (
+              {(check?.report || written.report).abilities.map((a) => (
                 <li key={a.name}>
                   <span className="font-mono text-[13px]">{a.name}</span> <span className="muted">{a.about}</span>
                 </li>
               ))}
-              {!written.report.abilities.length ? <li className="muted">No abilities of its own: it only uses what it was given.</li> : null}
+              {!(check?.report || written.report).abilities.length ? <li className="muted">No abilities of its own: it only uses what it was given.</li> : null}
               {setup.source ? <li className="muted">Everything the custom agent it starts from uses (documents, tools, data), as the person asking.</li> : null}
               <li className="muted">
-                Saves files into: {written.report.write_folders.length ? written.report.write_folders.join(", ") : "nowhere"} · Websites:{" "}
-                {written.report.websites.length ? written.report.websites.join(", ") : "none"}
-                {written.report.packages.length ? ` · Extra libraries: ${written.report.packages.join(", ")}` : ""}
+                Saves files into: {(check?.report || written.report).write_folders.join(", ") || "nowhere"} · Websites:{" "}
+                {(check?.report || written.report).websites.join(", ") || "none"}
+                {(check?.report || written.report).packages.length ? ` · Extra libraries: ${(check?.report || written.report).packages.join(", ")}` : ""}
               </li>
             </ul>
           </div>
 
+          <CodeIDE code={code} written={written.code} fixed={written.fixed || {}} check={check} checking={checking} onEdit={edit} />
+
           <div className="card p-6">
-            <h3 className="text-[17px] font-semibold">The code</h3>
+            <h3 className="text-[17px] font-semibold">Change it</h3>
             <p className="mt-1 text-[13px] muted">
-              Only these files are written by AI. app.py, agent/tools.py and agent/config.json are the portal&apos;s own: they decide whose
-              sign-in is used and what it can reach, and AI cannot change them.
+              Edit the code above yourself, or ask the AI in words. Either way it is checked again, and you approve it again before it
+              is deployed.
             </p>
-            <div className="mt-3 space-y-3">
-              {written.diff.map((f) => (
-                <details key={f.path} open={f.path === "agent/logic.py"} className="rounded-xl border" style={{ borderColor: "var(--line)" }}>
-                  <summary className="flex cursor-pointer flex-wrap items-center gap-2 px-4 py-2.5">
-                    <span className="font-mono text-[13.5px]">{f.path}</span>
-                    <span className="rounded-full px-2 text-[11.5px] font-semibold" style={{ background: "var(--bubble)" }}>
-                      {f.state === "same" ? "unchanged" : f.state}
-                    </span>
-                    {f.lines.length ? <span className="text-[12px] faint">{(written.code[f.path] || "").split("\n").length} lines</span> : null}
-                  </summary>
-                  {f.lines.length ? (
-                    <div className="px-3 pb-3">
-                      <Diff lines={f.lines} />
-                    </div>
-                  ) : null}
-                </details>
-              ))}
-            </div>
             <div className="mt-4 flex flex-wrap gap-2">
               <button type="button" className="btn btn-quiet" onClick={download}>
                 <DownloadIcon size={15} /> Download the project
@@ -443,9 +466,15 @@ export function CodeWriter({
               <input type="checkbox" className="mt-1 h-4 w-4" checked={read} onChange={(e) => setRead(e.target.checked)} />
               <span className="text-[14px]">I have read the code and what it can reach, and I approve it.</span>
             </label>
-            <button type="button" className="btn btn-primary btn-lg mt-4" disabled={!read || written.problems.length > 0} onClick={deployIt}>
+            <button
+              type="button"
+              className="btn btn-primary btn-lg mt-4"
+              disabled={!read || checking || !check || check.problems.length > 0}
+              onClick={deployIt}
+            >
               Deploy and test
             </button>
+            {check && check.problems.length ? <p className="help">Fix the problems in the code first.</p> : null}
           </div>
         </div>
       ) : null}

@@ -171,24 +171,7 @@ def _complete(endpoint: str, messages: list, tools: list | None, user_tok: str, 
         break
     assert resp is not None
     if resp.status_code >= 400:
-        try:
-            j = resp.json()
-            detail = str(j.get("message") or j.get("error_code") or "") if isinstance(j, dict) else ""
-        except ValueError:
-            detail = ""
-        detail = detail or resp.text[:200]
-        if resp.status_code == 401 or re.search(r"invalid token|token (?:has )?expired|expired token", detail, re.I):
-            # Seen live: an expired sign-in answers 403 "Invalid Token", which is not a missing permission.
-            raise DbxError("Your sign-in has expired. Refresh the page and try again; your conversation is kept.", 401)
-        if resp.status_code == 403:
-            raise DbxError(
-                "You do not have permission to use the model that powers this (%s). Ask a workspace "
-                "admin to give you Can Query on it. %s" % (endpoint, detail[:160]), 403)
-        if resp.status_code == 429:
-            raise DbxError("The model is busy right now. Wait a moment and try again.", 429)
-        if resp.status_code in (400, 404, 410) and RETIRED.search(detail):
-            raise ModelRetired(detail[:200], endpoint)
-        raise DbxError("The model could not answer: " + detail[:240], resp.status_code if resp.status_code < 500 else 502)
+        _refused(resp.status_code, resp.text, endpoint)
     try:
         data = resp.json()
         if usage is not None and isinstance(data.get("usage"), dict):
@@ -198,6 +181,97 @@ def _complete(endpoint: str, messages: list, tools: list | None, user_tok: str, 
         return data["choices"][0]["message"]
     except (ValueError, KeyError, IndexError, TypeError):
         raise DbxError("The model answered in a way this page could not read.", 502)
+
+
+def _refused(status: int, text: str, endpoint: str) -> None:
+    """Raise the plain-words error for a model call Databricks refused."""
+    try:
+        j = json.loads(text or "")
+        detail = str(j.get("message") or j.get("error_code") or "") if isinstance(j, dict) else ""
+    except ValueError:
+        detail = ""
+    detail = detail or (text or "")[:200]
+    if status == 401 or re.search(r"invalid token|token (?:has )?expired|expired token", detail, re.I):
+        # Seen live: an expired sign-in answers 403 "Invalid Token", which is not a missing permission.
+        raise DbxError("Your sign-in has expired. Refresh the page and try again; your conversation is kept.", 401)
+    if status == 403:
+        raise DbxError(
+            "You do not have permission to use the model that powers this (%s). Ask a workspace "
+            "admin to give you Can Query on it. %s" % (endpoint, detail[:160]), 403)
+    if status == 429:
+        raise DbxError("The model is busy right now. Wait a moment and try again.", 429)
+    if status in (400, 404, 410) and RETIRED.search(detail):
+        raise ModelRetired(detail[:200], endpoint)
+    raise DbxError("The model could not answer: " + detail[:240], status if status < 500 else 502)
+
+
+def stream_complete(endpoint: str, messages: list, user_tok: str, max_tokens: int, on_text) -> str:
+    """A completion whose words arrive as they are written (`stream: true`), for the code writer's live view.
+    `on_text` hears each piece of answer text. Returns the whole text.
+
+    Seen live (2026-11-04, Claude Sonnet 5.5 on Databricks): server-sent events, `choices[0].delta.content` as a
+    string (a list of blocks is also handled; reasoning blocks are not answer text), first words after ~1.5 s,
+    `[DONE]` at the end. No tools are sent: the code writer only needs text."""
+    if not re.match(r"^[\w\-.]{1,128}$", endpoint or ""):
+        raise DbxError("That model name is not valid. Choose another model.", 400)
+    body = {"messages": cached(endpoint, messages), "max_tokens": max_tokens, "stream": True}
+    out: list[str] = []
+    for attempt in (1, 2):
+        try:
+            with http().stream("POST", host() + "/serving-endpoints/" + endpoint + "/invocations",
+                               headers={"Authorization": "Bearer " + user_tok, "Content-Type": "application/json"},
+                               json=body, timeout=httpx.Timeout(300, connect=20)) as resp:
+                if resp.status_code >= 400:
+                    text = resp.read().decode("utf-8", "replace")
+                    if resp.status_code == 429 and attempt == 1:
+                        time.sleep(3)
+                        continue
+                    if resp.status_code == 400 and "cache_control" in text and body["messages"] is not messages:
+                        body["messages"] = messages
+                        continue
+                    _refused(resp.status_code, text, endpoint)
+                for line in resp.iter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        delta = (json.loads(data).get("choices") or [{}])[0].get("delta") or {}
+                    except ValueError:
+                        continue
+                    c = delta.get("content")
+                    pieces = [c] if isinstance(c, str) else [b.get("text", "") for b in c or []
+                                                            if isinstance(b, dict) and b.get("type") == "text"]
+                    for piece in pieces:
+                        if piece:
+                            out.append(piece)
+                            on_text(piece)
+            return "".join(out)
+        except httpx.RequestError as exc:
+            if out:
+                raise DbxError("The connection to the model dropped part-way. Try again.", 504)
+            raise DbxError("Could not reach the model: " + str(exc)[:120], 504)
+    raise DbxError("The model is busy right now. Wait a moment and try again.", 429)
+
+
+def ask_stream(role: str, use: dict, notes: list, messages: list, tok: str, max_tokens: int, on_text) -> str:
+    """`stream_complete` for one job, with the same switch to the next best model as `_ask` when one is retired."""
+    tried: list[str] = []
+    while True:
+        try:
+            return stream_complete(use[role], messages, tok, max_tokens, on_text)
+        except ModelRetired as exc:
+            bad = use[role]
+            tried.append(bad)
+            dm.mark_retired(bad)
+            nxt = dm.fallback(tok, role, tried, use.get("chat", ""))
+            if not nxt or len(tried) > 3:
+                raise DbxError("%s has been retired by Databricks and no other model is available. Choose another model." % dm.friendly(bad), 409)
+            notes.append("%s has been retired by Databricks, so %s was used instead." % (dm.friendly(bad), dm.friendly(nxt)))
+            for r in dm.ROLES:
+                if use.get(r) == bad:
+                    use[r] = nxt
 
 
 def _ask(role: str, use: dict, notes: list, messages: list, tools: list | None, tok: str, max_tokens: int = 3000) -> dict:

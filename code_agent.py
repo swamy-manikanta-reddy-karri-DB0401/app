@@ -105,8 +105,25 @@ def clean_setup(raw: dict) -> dict:
             "task": task, "write_folders": folders[:5], "websites": hosts[:10]}
 
 
+_base_cache: dict = {}
+
+
 def base(setup: dict, tok: str, urls: dict | None = None) -> dict:
-    """{path: text}: the project the code is written into, rebuilt from the setup (so fixed files are always ours)."""
+    """{path: text}: the project the code is written into, rebuilt from the setup (so fixed files are always ours).
+    Kept for a minute per setup and caller, because the page checks the code while the developer types."""
+    key = (json.dumps(setup, sort_keys=True), hashlib.sha256((tok or "").encode()).hexdigest()[:16], urls is not None)
+    hit = _base_cache.get(key)
+    if hit and time.time() - hit[0] < 60 and urls is None:
+        return dict(hit[1])
+    files = _base(setup, tok, urls)
+    if urls is None:
+        if len(_base_cache) > 200:
+            _base_cache.clear()
+        _base_cache[key] = (time.time(), files)
+    return dict(files)
+
+
+def _base(setup: dict, tok: str, urls: dict | None) -> dict:
     if setup["source"]:
         rec = custom_agents.latest(setup["source"])
         if not rec:
@@ -385,9 +402,21 @@ def clean_tests(raw) -> list:
 
 
 def write(setup: dict, tok: str, use: dict, notes: list, current: dict | None = None, request: str = "",
-          failures: list | None = None, step=lambda text: None, urls: dict | None = None) -> dict:
+          failures: list | None = None, step=lambda text: None, urls: dict | None = None, rounds: list | None = None) -> dict:
     """Have the code model write (current=None) or change the agent's code, and check it until it passes.
-    Returns {code, tests, summary, problems, report}."""
+    Returns {code, tests, summary, problems, report}.
+
+    `rounds` is filled as it goes, for the page's live view: one entry per model reply ({kind: write | change |
+    fix, text: the reply so far, problems: what the checks found after it}); the text grows while the model writes."""
+    rounds = rounds if rounds is not None else []
+
+    def stream(kind: str, msgs: list, max_tokens: int) -> str:
+        rnd = {"kind": kind, "text": "", "problems": None}
+        rounds.append(rnd)
+
+        def grow(piece: str) -> None:
+            rnd["text"] += piece
+        return designer.ask_stream("code", use, notes, msgs, tok, max_tokens, grow)
     project = base(setup, tok, urls)
     if current:
         project.update(current)
@@ -398,14 +427,15 @@ def write(setup: dict, tok: str, use: dict, notes: list, current: dict | None = 
         ask["failed_tests"] = (failures or [])[:6]
     msgs = [system, {"role": "user", "content": json.dumps(ask, ensure_ascii=False)}]
     step("Writing the code" if not current else "Making the change")
-    msg = designer._ask("code", use, notes, msgs, None, tok, max_tokens=CODE_TOKENS)
-    reply = designer._text(msg)
+    reply = stream("write" if not current else "change", msgs, CODE_TOKENS)
     files, apply_problems = apply_reply(project, reply)
     apply_problems += _kept_fixed(project, files)
     tests, summary = tests_from(reply), (SUMMARY_RE.search(reply or "") or [None, ""])[1]
     for rnd in range(EDIT_ROUNDS + 1):
+        step("Checking the code")
         res = check(setup, files)
         problems = apply_problems + res["problems"]
+        rounds[-1]["problems"] = problems
         if not problems or rnd == EDIT_ROUNDS:
             break
         step("Fixing what the checks found (%d)" % (rnd + 1))
@@ -414,12 +444,12 @@ def write(setup: dict, tok: str, use: dict, notes: list, current: dict | None = 
                 {"role": "user", "content": designer.EDIT_PROMPT.replace("Reply ONLY with edits", "Reply ONLY with edits, inside "
                  "=== EDIT <path> === ... === END EDIT === blocks (or a whole === FILE <path> === block)") +
                  "\n\nProblems:\n- " + "\n- ".join(problems)}]
-        msg = designer._ask("code", use, notes, msgs, None, tok, max_tokens=designer.EDIT_TOKENS * 2)
+        edit = stream("fix", msgs, designer.EDIT_TOKENS * 2)
         before = files
-        files, apply_problems = apply_reply(files, designer._text(msg))
+        files, apply_problems = apply_reply(files, edit)
         apply_problems += _kept_fixed(before, files)
     return {"code": editable(files), "tests": tests, "summary": " ".join(summary.split())[:600], "problems": problems,
-            "report": res["report"]}
+            "report": res["report"], "fixed": {p: files[p] for p in ("app.py", "agent/tools.py", "agent/config.json") if p in files}}
 
 
 def review(setup: dict, result: dict, who: dict, tok: str, use: dict) -> list:
@@ -437,7 +467,7 @@ def review(setup: dict, result: dict, who: dict, tok: str, use: dict) -> list:
 def _job(owner: str, kind: str, fn) -> dict:
     now = time.time()
     j = {"id": hashlib.sha256(("%s|%s|%s" % (owner, kind, now)).encode()).hexdigest()[:20], "owner": owner, "kind": kind,
-         "state": "working", "step": "Starting", "started": now, "result": None, "error": "", "notes": []}
+         "state": "working", "step": "Starting", "started": now, "result": None, "error": "", "notes": [], "rounds": []}
     with _lock:
         for k in [k for k, v in _jobs.items() if now - v["started"] > 3 * 3600]:
             _jobs.pop(k, None)
@@ -466,7 +496,7 @@ def start_write(setup: dict, who: dict, tok: str, models, current: dict | None =
 
     def fn(j):
         j["notes"] = notes
-        out = write(setup, tok, use, notes, current, request, failures, step=lambda t: j.update(step=t))
+        out = write(setup, tok, use, notes, current, request, failures, step=lambda t: j.update(step=t), rounds=j["rounds"])
         if not out["problems"]:
             j["step"] = "Checking it against your admins' rules"
             out["problems"] = review(setup, out, who, tok, use)
@@ -512,14 +542,30 @@ def job(job_id: str, who: dict) -> dict:
     return {k: v for k, v in j.items() if k != "owner"}
 
 
-def deploy(setup: dict, code: dict, tests: list, approved: str, display_name: str, app_name: str, who: dict, tok: str) -> dict:
-    """Re-check exactly what was approved and deploy it (code_upload checks the files again on the way in)."""
+def check_code(setup: dict, code: dict, tok: str, previous: dict | None = None) -> dict:
+    """The checks on code as it is now (a developer's own edit, checked while they type): problems, what it can
+    reach, the changes against the project it started from (or `previous`), and the fingerprint to approve. No
+    model is asked; nothing is run."""
+    files = assemble(setup, code, tok)
+    res = check(setup, files)
+    old = base(setup, tok) if previous is None else {**base(setup, tok), **editable(previous)}
+    return {**res, "diff": diff(old, files), "fingerprint": fingerprint(setup, files)}
+
+
+def deploy(setup: dict, code: dict, tests: list, approved: str, display_name: str, app_name: str, who: dict, tok: str,
+           models=None) -> dict:
+    """Re-check exactly what was approved and deploy it (code_upload checks the files again on the way in). The
+    admins' plain-words rules are judged again here, so code edited by hand is held to them too."""
     files = assemble(setup, code, tok, clean_tests(tests))
     if fingerprint(setup, files) != approved:
         raise DbxError("The code changed after you approved it. Review it again.", 409)
     res = check(setup, files)
     if res["problems"]:
         raise DbxError("It does not pass the checks: " + res["problems"][0], 400)
+    if designer_guard.settings().get("rules"):
+        broken = review(setup, {"code": editable(files), "report": res["report"]}, who, tok, dm.resolve(models, tok, []))
+        if broken:
+            raise DbxError(broken[0], 400)
     root = agent_export._slug(setup["name"])
     return code_upload.start(agent_export.zip_of(files, root), display_name or setup["name"], setup["description"],
                              app_name, who, tok)

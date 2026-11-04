@@ -65,10 +65,13 @@ def scripted(*replies):
     seen = []
     it = iter(replies)
 
-    def ask(role, use, notes, messages, tools, tok, max_tokens=3000):
+    def ask(role, use, notes, messages, tok, max_tokens, on_text):
         seen.append(messages)
-        return {"content": next(it)}
-    designer._ask = ask
+        text = next(it)
+        for i in range(0, len(text), 50):  # in pieces, as a stream arrives
+            on_text(text[i:i + 50])
+        return text
+    designer.ask_stream = ask
     return seen
 
 
@@ -200,6 +203,46 @@ def _():
                 sys.modules.pop(m)
 
 
+@case("live view: each model reply is a round whose text grows as it streams, with what the checks found after it")
+def _():
+    bad = LOGIC_OK.replace("    return {\"margin\"", "    eval('1')\n    return {\"margin\"")
+    first = reply({"agent/logic.py": bad})
+    scripted(first, "=== EDIT agent/logic.py ===\n<<<<<<< SEARCH\n    eval('1')\n=======\n    pass\n>>>>>>> REPLACE\n=== END EDIT ===\n")
+    rounds = []
+    out = ca.write(SETUP, "T", dict(USE), [], urls={}, rounds=rounds)
+    assert [r["kind"] for r in rounds] == ["write", "fix"], rounds
+    assert rounds[0]["text"] == first and any("eval() is not allowed" in p for p in rounds[0]["problems"])
+    assert "=== EDIT agent/logic.py ===" in rounds[1]["text"] and rounds[1]["problems"] == []
+    assert set(out["fixed"]) == {"app.py", "agent/tools.py", "agent/config.json"}  # shown locked on the page
+
+
+@case("hand edits: checked while typing (problems with their lines, reach, changes, a new fingerprint); rules at deploy")
+def _():
+    good = {"agent/logic.py": LOGIC_OK}
+    a = ca.check_code(SETUP, good, "T")
+    assert a["problems"] == [] and a["report"]["abilities"][0]["name"] == "margin"
+    edited = {"agent/logic.py": LOGIC_OK.replace("round((net - hard_cost) / net, 4)", "eval('1')")}
+    b = ca.check_code(SETUP, edited, "T", previous=good)
+    assert any(p.startswith("agent/logic.py line 14 (") for p in b["problems"]), b["problems"]
+    assert b["fingerprint"] != a["fingerprint"]
+    logic = [d for d in b["diff"] if d["path"] == "agent/logic.py"][0]
+    assert logic["state"] == "changed" and any(l.startswith("+") and "eval" in l for l in logic["lines"])
+    # with admins' rules set, deploy judges the code against them (so hand edits are held to them too)
+    import code_upload
+    saved = (designer_guard.settings, ca.review, code_upload.start, ca.dm.resolve)
+    ca.dm.resolve = lambda models, tok, notes=None: dict(USE)
+    designer_guard.settings = lambda: dict(designer_guard.DEFAULTS, rules=["Never calculate margins."])
+    ca.review = lambda setup, result, who, tok, use: ["This breaks your admins' rule \"Never calculate margins.\""]
+    code_upload.start = lambda *a, **k: (_ for _ in ()).throw(AssertionError("deployed despite a broken rule"))
+    try:
+        ca.deploy(SETUP, good, [], a["fingerprint"], "", "", {"user_name": "d"}, "T", {"judge": "x"})
+        raise AssertionError("not refused")
+    except DbxError as exc:
+        assert exc.status == 400 and "Never calculate margins" in str(exc)
+    finally:
+        designer_guard.settings, ca.review, code_upload.start, ca.dm.resolve = saved
+
+
 @case("setup is checked; only Developer mode may write, change, deploy, test or download")
 def _():
     for bad in ({"framework": "mlflow", "task": "x" * 30}, {"name": "A b", "task": "short"},
@@ -216,7 +259,7 @@ def _():
     portal.access.identity = lambda tok: {"user_name": "dev@example.com", "is_admin": True, "groups": ["admins"]}
     c = TestClient(portal.app, raise_server_exceptions=False)
     body = {"setup": {"name": "Plan Maker", "model": "", "source": "", "task": "Works out the margin of a media plan."}}
-    for path in ("write", "change", "deploy", "test", "zip"):
+    for path in ("write", "change", "deploy", "test", "zip", "check"):
         assert c.post("/api/admin/code-agents/ai/" + path, json=body).status_code == 403, path
     assert c.get("/api/admin/code-agents/ai/jobs/x").status_code == 403
 

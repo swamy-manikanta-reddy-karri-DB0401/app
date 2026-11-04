@@ -616,7 +616,7 @@ function LimitsDialog({
   return (
     <Dialog
       title="Usage limits"
-      sub="These do not change what it does, so no new test or approval is needed."
+      sub="Changes apply straight away. The agent won't need to be tested or approved again."
       onClose={onClose}
       footer={
         <>

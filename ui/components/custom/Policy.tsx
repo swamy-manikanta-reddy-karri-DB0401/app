@@ -259,7 +259,7 @@ export function PolicyEditor({
               ]}
             />
           </Row>
-          <Row label="Longest message" help="In characters. 0 means no limit.">
+          <Row label="Longest message" help="In characters. Leave at 0 for no limit.">
             <input
               type="number"
               min={0}
@@ -500,8 +500,8 @@ export function UsageFields({
   return (
     <>
       <p className="help !mt-0">
-        Not part of what is tested: change them any time on its page, without a
-        new approval. 0 means no limit.
+        You can change these later on the agent&apos;s page. It won&apos;t need to be
+        tested or approved again. Leave a box at 0 for no limit.
       </p>
       <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {field("requests", "Questions in the period")}

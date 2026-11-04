@@ -396,7 +396,7 @@ export function CustomWizard({
         <AccessStep
           access={spec.audience as Access[]}
           setAccess={(a) => set({ audience: a })}
-          note="They can use it once it has been tested and approved, not before. You can change this later without a new approval."
+          note="They can use it once it has been tested and approved, not before. You can change who uses it later; it won't need to be tested or approved again."
         />
       ) : null}
 
@@ -916,7 +916,7 @@ function LimitsStep({ spec, set, price }: { spec: CustomSpec; set: (p: Partial<C
       </div>
       <section>
         <p className="label">Each answer</p>
-        <p className="help !mt-0">Part of what is tested, so a change here needs a new test.</p>
+        <p className="help !mt-0">If you change these later, the agent is tested and approved again before people get the change.</p>
         <div className="mt-2 grid gap-3 sm:grid-cols-2">
           <label className="block">
             <span className="text-[13px] font-medium muted">Most steps (each look-up or tool use is a step)</span>

@@ -649,7 +649,7 @@ def _custom_or_404(agent_id: str) -> dict:
     return custom_agents.summary(agent_id)
 
 
-def _custom_detail(agent_id: str) -> dict:
+def _custom_detail(agent_id: str, tok: str = "") -> dict:
     out = _custom_or_404(agent_id)
     last = custom_agents.latest(agent_id)
     out["spec"] = dict(last["spec"], policy=custom_agents.policy_of(last["spec"]))
@@ -660,7 +660,7 @@ def _custom_detail(agent_id: str) -> dict:
     out["live_spec"] = cur["spec"] if cur and cur["version"] != last["version"] else None
     out["key"] = custom_agents.key(agent_id, last["version"])
     try:
-        out["usage"] = custom_agents.usage_summary(cur or last)
+        out["usage"] = custom_agents.usage_summary(cur or last, tok)
     except DbxError:
         out["usage"] = None  # the page says usage could not be read; nothing else depends on it
     return out
@@ -789,7 +789,7 @@ def _safety_view(agent_id: str, tok: str) -> dict:
         except DbxError:
             safety_results = []
     cur = custom_agents.live(agent_id) or rec
-    price, note = safety.usd_per_dbu(rec["spec"]["model"])
+    price, note = safety.usd_per_dbu(rec["spec"]["model"], tok)
     return {"guardrails": custom_agents.guardrails(rec["spec"]["model"], tok),
             "policy": custom_agents.policy_of(rec["spec"]),
             "live_policy": custom_agents.policy_of(cur["spec"]) if cur["version"] != rec["version"] else None,
@@ -885,8 +885,8 @@ def custom_restore(agent_id: str, payload: dict = Body(...), x_forwarded_access_
 
 @app.get("/api/admin/custom-agents/{agent_id}")
 def custom_get(agent_id: str, x_forwarded_access_token: str = Header(None)):
-    _require_admin(x_forwarded_access_token)
-    return _custom_detail(agent_id)
+    _, tok = _require_admin(x_forwarded_access_token)
+    return _custom_detail(agent_id, tok)
 
 
 @app.post("/api/admin/custom-agents")

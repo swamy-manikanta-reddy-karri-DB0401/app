@@ -1150,7 +1150,7 @@ def ask(rec: dict, history: list, tok: str, who: dict, mode: str = "chat", depth
         raise DbxError("Nothing to answer.", 400)
     pol = policy_of(rec["spec"])
     if mode == "chat":
-        check_limits(rec, who, pol)
+        check_limits(rec, who, pol, tok)
     usage: list = []
     flags: list = []
     try:
@@ -1643,13 +1643,13 @@ def questions_today(agent_id: str, user: str) -> float:
                     "AND at >= date_trunc('DAY', current_timestamp())", [_p("a", agent_id), _p("u", user)], 1)[0]
 
 
-def cost_usd(rec: dict, dbus: float) -> tuple:
+def cost_usd(rec: dict, dbus: float, tok: str = "") -> tuple:
     """(USD or None, how it was worked out): DBUs times Databricks' own list price for the model's SKU."""
-    price, note = safety.usd_per_dbu(rec["spec"]["model"])
+    price, note = safety.usd_per_dbu(rec["spec"]["model"], tok)
     return (round(dbus * price, 4) if price is not None else None), note
 
 
-def check_limits(rec: dict, who: dict, pol: dict) -> None:
+def check_limits(rec: dict, who: dict, pol: dict, tok: str = "") -> None:
     """Polite refusals at a limit, never an error page. Builders and approvers trying a preview are
     held to the same limits, so what they try is what people get."""
     u = pol.get("usage") or {}
@@ -1668,7 +1668,7 @@ def check_limits(rec: dict, who: dict, pol: dict) -> None:
     if u.get("tokens") and tot["tokens"] >= u["tokens"]:
         raise DbxError("%s has used its limit of %s tokens %s. An admin can raise it on its page." % (name, format(u["tokens"], ","), span), 429)
     if u.get("cost_usd"):
-        usd, _ = cost_usd(rec, tot["dbus"])
+        usd, _ = cost_usd(rec, tot["dbus"], tok)
         if usd is not None and usd >= u["cost_usd"]:
             raise DbxError("%s has used its spending limit of $%g %s. An admin can raise it on its page." % (name, u["cost_usd"], span), 429)
 
@@ -1722,7 +1722,7 @@ def record_usage(rec: dict, who: dict, mode: str, usage: list, tok: str, questio
     threading.Thread(target=write, daemon=True).start()
 
 
-def usage_summary(rec: dict) -> dict:
+def usage_summary(rec: dict, tok: str = "") -> dict:
     """Over the policy's window and today, for the agent's page, with the cost at Databricks' list price."""
     days = int((policy_of(rec["spec"]).get("usage") or {}).get("days") or 30)
     rows = store.run("SELECT COUNT_IF(kind = 'question'), COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0), "
@@ -1732,7 +1732,7 @@ def usage_summary(rec: dict) -> dict:
                      [_p("a", rec["agent_id"]), _p("d", days, "INT")])
     r = rows[0] if rows else [0, 0, 0, 0, 0, 0]
     dbus = round(float(r[3] or 0), 4)
-    usd, note = cost_usd(rec, dbus)
+    usd, note = cost_usd(rec, dbus, tok)
     return {"days": days, "questions": int(r[0] or 0), "tokens_in": int(r[1] or 0), "tokens_out": int(r[2] or 0),
             "dbus": dbus, "usd": usd, "price_note": note, "people": int(r[4] or 0), "questions_today": int(r[5] or 0)}
 

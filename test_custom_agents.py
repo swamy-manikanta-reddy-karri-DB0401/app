@@ -804,6 +804,33 @@ def _():
     assert "unsafe" in out["blocked"] and out["flags"] == ["input:unsafe"], out
 
 
+@case("price per DBU: read as the portal, else as the admin who opens the page, then kept for everyone")
+def _():
+    import llm
+
+    fresh()
+    real = ca.store.run
+
+    def refused(sql, params=None):
+        if "system.billing" in sql:
+            raise DbxError("Principal 'app-x' does not have USE SCHEMA on Schema 'system.billing'", 403)
+        return real(sql, params)
+
+    ca.store.run = refused
+    asked = []
+    llm._warehouse = lambda tok: "wh"
+    llm._sql = lambda q, tok, wh: asked.append((q, tok)) or [["0.105", "PREMIUM_ANTHROPIC_MODEL_SERVING"]]
+    price, note = ca.safety.usd_per_dbu("databricks-claude-sonnet-5-5")
+    assert price is None and "admin" in note and not asked  # no one to read it as yet: not guessed
+    price, note = ca.safety.usd_per_dbu("databricks-claude-sonnet-5-5", "ADMIN-TOK")
+    assert price == 0.105 and "PREMIUM_ANTHROPIC_MODEL_SERVING" in note and asked[-1][1] == "ADMIN-TOK"
+    assert "'databricks-claude-sonnet-5-5'" in asked[-1][0]
+    assert ca.safety.usd_per_dbu("databricks-claude-sonnet-5-5")[0] == 0.105  # now known for everyone
+    n = len(asked)
+    assert ca.safety.usd_per_dbu("x' OR '1'='1", "ADMIN-TOK")[0] is None and len(asked) == n  # never reaches SQL
+    ca.store.run = real
+
+
 @case("safety: every full test runs the fixed safety pack, and a quick test can never be sent for approval")
 def _():
     fresh()

@@ -25,6 +25,7 @@ mask and removal is recorded on the audit record as a flag; never the text.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -350,28 +351,53 @@ _price: dict = {}   # model -> (time, usd per DBU or None, note)
 PRICE_TTL = 6 * 3600
 
 
-def usd_per_dbu(model: str) -> tuple:
+PRICE_SQL = ("SELECT p.pricing.default, u.sku_name FROM system.billing.usage u JOIN system.billing.list_prices p "
+             "ON p.sku_name = u.sku_name AND p.price_end_time IS NULL "
+             "WHERE u.billing_origin_product = 'MODEL_SERVING' AND u.usage_metadata.endpoint_name = %s "
+             "ORDER BY u.usage_date DESC LIMIT 1")
+
+
+def _price_rows(model: str, tok: str) -> list:
+    """As the portal; then, if that is refused, as the signed-in person (admins can usually read billing).
+    Learnt live (2026-11-04): a deployed portal's identity has no USE SCHEMA on system.billing, and a
+    workspace admin cannot grant it (only an account or metastore admin can), while the admin can read it."""
+    try:
+        return store.run(PRICE_SQL % ":m", [{"name": "m", "type": "STRING", "value": model}])
+    except DbxError:
+        if not tok or not MODEL_RE.match(model):
+            raise
+    import llm  # late: only needed on this path
+
+    # The model name is checked against MODEL_RE (letters, digits, - _ .), so it is safe as a literal here.
+    return llm._sql(PRICE_SQL % ("'" + model + "'"), tok, llm._warehouse(tok))
+
+
+def _whose(tok: str) -> str:
+    return hashlib.sha256(tok.encode("utf-8")).hexdigest()[:12] if tok else ""
+
+
+def usd_per_dbu(model: str, tok: str = "") -> tuple:
     """(USD per DBU, note). Databricks' list price for the SKU this model's usage is billed under, from
-    system.billing (read as the portal). None with a reason when it cannot be read or nothing is billed yet."""
+    system.billing. None with a reason when it cannot be read or nothing is billed yet. A price that was
+    read is kept for everyone for hours, whoever read it."""
     hit = _price.get(model)
-    if hit and time.time() - hit[0] < PRICE_TTL:
+    if hit and time.time() - hit[0] < PRICE_TTL and (hit[1] is not None or not tok or hit[3] == _whose(tok)):
         return hit[1], hit[2]
     try:
-        rows = store.run(
-            "SELECT p.pricing.default, u.sku_name FROM system.billing.usage u JOIN system.billing.list_prices p "
-            "ON p.sku_name = u.sku_name AND p.price_end_time IS NULL "
-            "WHERE u.billing_origin_product = 'MODEL_SERVING' AND u.usage_metadata.endpoint_name = :m "
-            "ORDER BY u.usage_date DESC LIMIT 1", [{"name": "m", "type": "STRING", "value": model}])
+        rows = _price_rows(model, tok)
         if rows and rows[0] and rows[0][0] is not None:
             val, note = float(rows[0][0]), "Databricks list price for %s" % rows[0][1]
         else:
             val, note = None, "Databricks has not billed this model here yet, so its price per DBU is not known yet"
     except DbxError as exc:
+        if hit and hit[1] is not None:
+            return hit[1], hit[2]
         val = None
-        note = ("The portal cannot read Databricks' price list. Grant its service principal SELECT on "
-                "system.billing.usage and system.billing.list_prices. (%s)" % str(exc)[:120])
-    # A price is kept for hours; "not known yet" is asked again after ten minutes.
-    _price[model] = (time.time() - (0 if val is not None else PRICE_TTL - 600), val, note)
+        note = ("Databricks' price list cannot be read yet. It is read when an admin who can see billing opens this "
+                "agent's page, or grant the portal's identity SELECT on system.billing.usage and system.billing.list_prices. (%s)"
+                % str(exc)[:120])
+    # A price is kept for hours; "not known yet" is asked again after ten minutes (or at once by someone else).
+    _price[model] = (time.time() - (0 if val is not None else PRICE_TTL - 600), val, note, _whose(tok))
     return val, note
 
 

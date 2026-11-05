@@ -129,7 +129,7 @@ def _():
         assert j["state"] == "done", j
         entry, files = fw.installed[0]
         assert entry["description"].startswith(cu.MARK) and entry["source_root"] == cu.ROOT
-        assert "serving.serving-endpoints" in entry["user_api_scopes"], entry["user_api_scopes"]  # read from update-scopes.json
+        assert "serving.serving-endpoints" in entry["user_api_scopes"], entry["user_api_scopes"]  # local: update-scopes.json
         assert dict(files)["app.yaml"].startswith(b"command")
         assert fw.saved[0][0] == "agent-media-plan-builder" and fw.saved[0][1]["path"] == "/invocations"
         try:
@@ -168,6 +168,41 @@ def _():
                 assert exc.status == 400
     finally:
         restore()
+
+
+@case("a deployment Databricks refused is a failure, even when the app runs (its old code)")
+def _():
+    import mcps
+    fw, restore = with_fakes({"agent-mine": {"name": "agent-mine", "description": cu.MARK + " earlier"}})
+    real_install = mcps.install
+
+    def refused(entry, who, tok, files=None):
+        fw.installed.append((entry, files))
+        mcps._progress[entry["app_name"]] = {"phase": "failed", "message": "Cannot deploy: it has no requirements.txt", "at": time.time()}
+        return True
+    mcps.install = refused
+    try:
+        out = cu.start(zip_of(GOOD), "Thing", "", "agent-mine", {"user_name": "dev@example.com"}, "T")
+        j = wait(out["job"], {"user_name": "dev@example.com"})
+        assert j["state"] == "failed" and "no requirements.txt" in j["step"], j
+    finally:
+        mcps.install = real_install
+        mcps._progress.pop("agent-mine", None)
+        restore()
+
+
+@case("a new agent asks for exactly the portal's own scopes, so the person's token can always be passed on")
+def _():
+    real = cu.portal_scopes
+    try:
+        cu.portal_scopes = lambda: ["sql", "model-serving", "genie"]
+        assert cu._scopes() == ["sql", "model-serving", "genie"]
+        assert cu.scope_gap({"user_api_scopes": ["sql", "files.files", "dashboards.genie"]}) == ["dashboards.genie", "files.files"]
+        assert cu.scope_gap({"user_api_scopes": ["sql"]}) == []
+        cu.portal_scopes = lambda: None  # outside Apps (local dev): the repo's list
+        assert "serving.serving-endpoints" in cu._scopes() and cu.scope_gap({"user_api_scopes": ["x"]}) == []
+    finally:
+        cu.portal_scopes = real
 
 
 @case("only Developer mode may upload or read a job")

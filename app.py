@@ -612,6 +612,15 @@ def app_agent_try(payload: dict = Body(...), x_forwarded_access_token: str = Hea
     info = app_agents.check(name, tok)
     if not info["running"]:
         return {"ok": False, "message": info["message"]}
+    try:
+        gap = code_upload.scope_gap(app_agents._as("GET", "/api/2.0/apps/" + name, tok))
+    except DbxError:
+        gap = []
+    if gap:
+        # Databricks will not pass the person's sign-in to an app that asks for more than the portal holds.
+        return {"ok": False, "message": "This agent asks for permissions this portal's sign-in does not have (%s), so "
+                "Databricks will not pass your sign-in on and the agent cannot answer. An admin can add them to the "
+                "portal's user authorization (update-scopes.json) and restart the portal." % ", ".join(gap)}
     url = info["url"].rstrip("/") + path
     started = time.monotonic()
     try:

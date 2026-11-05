@@ -92,12 +92,48 @@ def read_project(blob: bytes) -> list:
     return out
 
 
-def _scopes() -> list:
+def _file_scopes() -> list:
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "update-scopes.json"), encoding="utf-8") as fh:
             return list(json.load(fh).get("user_api_scopes") or [])
     except (OSError, ValueError):
         return []
+
+
+def portal_scopes() -> list | None:
+    """The user API scopes of the portal app itself (None outside Apps, or when they cannot be read).
+
+    Learnt live (2026-11-05): Databricks forwards a person's token to an agent app (X-Forwarded-Access-Token) only when
+    the token the portal holds covers every scope the agent app asks for; it never widens it. agent-portal-new had
+    scopes set by hand under older names (model-serving, genie, files, ...), covering 3 of the 12 in
+    update-scopes.json, so every agent uploaded through it received no token and refused ("No signed-in person's
+    token reached the app"); the same agents answered through the client portal, whose scopes come from
+    update-scopes.json on every deploy. The creator of the app made no difference (checked with an app made by a
+    person and one made by the portal's identity)."""
+    name = os.environ.get("DATABRICKS_APP_NAME")
+    if not name:
+        return None
+    try:
+        from dbx import app_token, call
+
+        return list(call("GET", "/api/2.0/apps/" + name, app_token(), quiet=True).get("user_api_scopes") or [])
+    except Exception:  # noqa: BLE001 - the file's list is used instead
+        return None
+
+
+def _scopes() -> list:
+    """What a new agent app asks for: exactly the portal's own scopes when they can be read (so the person's token
+    can always be passed on), else update-scopes.json."""
+    own = portal_scopes()
+    return own if own else _file_scopes()
+
+
+def scope_gap(app: dict) -> list:
+    """Scopes an agent app asks for that the portal's own token does not cover ([] when fine or unknown)."""
+    own = portal_scopes()
+    if not own:
+        return []
+    return sorted(set(app.get("user_api_scopes") or []) - set(own))
 
 
 def owned(app: dict | None) -> bool:
@@ -137,12 +173,24 @@ def _run(job: str, entry: dict, files: list, display_name: str, description: str
     # live: the tests ran 30 s before the app had started). So the active deployment must have succeeded and be
     # newer than this upload (as tooltest.deployed_since does for repairs; ISO times in one format compare as text).
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 5))
+    started_at = time.time() - 5
     try:
         mcps.install(entry, who, tok, files=files)
         deadline, retries = time.time() + 20 * 60, 0
         while True:
             apps, _ = mcps._apps(tok)
-            state, line = mcps._state(apps.get(name), mcps._progress.get(name))
+            prog = mcps._progress.get(name) or {}
+            if prog.get("phase") == "failed" and prog.get("at", 0) >= started_at:
+                # Databricks refused this upload's deployment. The app may still be running, but with its old code
+                # (seen live: "Cannot deploy app ... as there is an active deployment in progress" and yet "done").
+                if retries < mcps.DEPLOY_RETRIES and "deployment in progress" in str(prog.get("message")):
+                    retries += 1
+                    time.sleep(30)
+                    mcps._progress.pop(name, None)
+                    mcps.redeploy(entry, tok)
+                    continue
+                raise DbxError(str(prog.get("message") or "the deployment was refused"), 502)
+            state, line = mcps._state(apps.get(name), prog or None)
             _jobs[job]["step"] = line or "Deploying."
             if state == "running" and _live_since(apps.get(name) or {}, since):
                 break
